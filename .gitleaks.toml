@@ -1,0 +1,9 @@
+title = "Kopuz secret detection"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public flakey Nix signing key, never an upload credential"
+regexTarget = "secret"
+regexes = ['''^(?:flakey:)?mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=?$''']

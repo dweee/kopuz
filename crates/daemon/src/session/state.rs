@@ -20,6 +20,20 @@ impl Session {
             }
         }
         self.queue_dirty = true;
+        let (primary, fading, playing) = self.player.audible_sessions();
+        self.audible_tx.send_replace(super::AudibleState {
+            primary: if self.external.is_none() {
+                primary
+            } else {
+                None
+            },
+            fading: if self.external.is_none() {
+                fading
+            } else {
+                None
+            },
+            playing: playing && self.external.is_none(),
+        });
         let state = self.build_state();
         if queue_changed {
             self.emit(ApiEvent::QueueChanged {

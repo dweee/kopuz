@@ -38,6 +38,10 @@ impl ProviderClient {
 
     pub async fn login(&self, username: &str, password: &str) -> Result<AuthSession, String> {
         match self.service {
+            MusicService::Qobuz => {
+                let client = crate::qobuz::QobuzClient::login(username, password, None, None).await.map_err(|e| e.to_string())?;
+                Ok(AuthSession { access_token: client.pack_session().map_err(|e| e.to_string())?, user_id: client.user_id().to_owned() })
+            }
             MusicService::Jellyfin => {
                 let mut client = JellyfinClient::new(&self.server_url, None, &self.device_id, None);
                 let (access_token, user_id) = client.login(username, password).await?;

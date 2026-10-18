@@ -343,6 +343,7 @@ pub async fn flush_volume(session: &SessionHandle, config: &ConfigService) {
 
 /// Flush what the core owns. Callers that bound a socket unlink it themselves.
 pub async fn shutdown(core: Core) {
+    core.scrobbler.shutdown_reports().await;
     flush_volume(&core.session, &core.config_service).await;
     core.session.persist_now().await;
 }

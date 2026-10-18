@@ -115,6 +115,7 @@ impl TrackId {
             ("soundcloud", config::MusicService::SoundCloud),
             ("applemusic", config::MusicService::AppleMusic),
             ("spotify", config::MusicService::Spotify),
+            ("qobuz", config::MusicService::Qobuz),
             ("nextcloud", config::MusicService::Nextcloud),
             ("clippsly", config::MusicService::Clippsly),
             ("smb", config::MusicService::Smb),
@@ -145,6 +146,7 @@ fn service_prefix(s: config::MusicService) -> &'static str {
         config::MusicService::SoundCloud => "soundcloud",
         config::MusicService::AppleMusic => "applemusic",
         config::MusicService::Spotify => "spotify",
+        config::MusicService::Qobuz => "qobuz",
         config::MusicService::Nextcloud => "nextcloud",
         config::MusicService::Clippsly => "clippsly",
         config::MusicService::Smb => "smb",
@@ -260,9 +262,8 @@ impl CoverRef {
             // Their item identity is irrelevant to cover resolution.
             // Nextcloud too: an img tag won't send the Basic auth its previews
             // need, so the sync caches art to disk and the ref carries a path.
-            "ytmusic" | "soundcloud" | "applemusic" | "nextcloud" | "clippsly" | "smb" => {
-                value.map_or(Self::None, Self::parse)
-            }
+            "ytmusic" | "soundcloud" | "applemusic" | "qobuz" | "nextcloud" | "clippsly"
+            | "smb" => value.map_or(Self::None, Self::parse),
             _ => Self::None,
         }
     }
@@ -298,6 +299,7 @@ impl CoverRef {
             | MusicService::SoundCloud
             | MusicService::AppleMusic
             | MusicService::Spotify
+            | MusicService::Qobuz
             | MusicService::Nextcloud
             | MusicService::Clippsly
             | MusicService::Smb => cover.map_or(Self::None, Self::parse),
@@ -353,6 +355,7 @@ impl CoverRef {
             MusicService::SoundCloud
             | MusicService::AppleMusic
             | MusicService::Spotify
+            | MusicService::Qobuz
             | MusicService::Nextcloud
             | MusicService::Clippsly
             | MusicService::Smb => track.cover.as_deref().map_or(Self::None, Self::parse),
@@ -390,7 +393,7 @@ impl CoverRef {
             return None;
         }
         let mut bytes = Vec::with_capacity(hex.len() / 2);
-        for pair in hex.as_bytes().chunks_exact(2) {
+        for pair in hex.as_bytes().as_chunks::<2>().0 {
             let pair = std::str::from_utf8(pair).ok()?;
             bytes.push(u8::from_str_radix(pair, 16).ok()?);
         }

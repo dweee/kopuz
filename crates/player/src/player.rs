@@ -327,6 +327,18 @@ impl Player {
         self.status().token
     }
 
+    /// Engine sessions whose audio is current, including both sides of an
+    /// actual crossfade. A pending/queued next session is deliberately absent.
+    pub fn audible_sessions(&self) -> (Option<u64>, Option<u64>, bool) {
+        let status = self.status();
+        let loaded = matches!(status.phase, Phase::Playing | Phase::Paused);
+        (
+            loaded.then_some(status.token),
+            status.fading.as_ref().filter(|_| loaded).map(|f| f.token),
+            loaded && !status.paused,
+        )
+    }
+
     /// Seek a specific session; the engine ignores it if a completed crossfade
     /// has since promoted a different one.
     pub fn seek_for_session(&self, time: Duration, token: u64) {

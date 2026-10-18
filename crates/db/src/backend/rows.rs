@@ -210,6 +210,7 @@ pub fn parse_service(s: &str) -> config::MusicService {
         "SoundCloud" => config::MusicService::SoundCloud,
         "AppleMusic" => config::MusicService::AppleMusic,
         "Spotify" => config::MusicService::Spotify,
+        "Qobuz" => config::MusicService::Qobuz,
         "Nextcloud" => config::MusicService::Nextcloud,
         "Clippsly" => config::MusicService::Clippsly,
         "Smb" => config::MusicService::Smb,
@@ -226,7 +227,7 @@ mod tests {
         use config::MusicService::*;
 
         for service in [
-            Jellyfin, Subsonic, Custom, YtMusic, AppleMusic, SoundCloud, Spotify, Nextcloud,
+            Jellyfin, Subsonic, Custom, YtMusic, AppleMusic, SoundCloud, Spotify, Qobuz, Nextcloud,
             Clippsly, Smb,
         ] {
             let stored = crate::backend::writes::service_str(service);

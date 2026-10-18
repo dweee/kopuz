@@ -38,10 +38,12 @@ mod jellyfin;
 mod local;
 mod nextcloud;
 mod offline;
+mod qobuz;
 mod search;
 mod smb;
 mod soundcloud;
 mod spotify;
+pub use qobuz::take_playback_report;
 mod subsonic;
 mod types;
 mod youtube_music;
@@ -106,6 +108,16 @@ pub trait MediaSource: Send + Sync {
     /// Resolve a playable stream for one item id (local = a file path, server =
     /// the remote's URL / deciphered stream).
     async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError>;
+
+    /// Resolve for one engine session. A source can bind royalty/provenance
+    /// metadata to this token without treating a preload or download as a listen.
+    async fn resolve_stream_for_playback(
+        &self,
+        item_id: &str,
+        _token: u64,
+    ) -> Result<StreamInfo, SourceError> {
+        self.resolve_stream(item_id).await
+    }
 
     /// A seekable protocol-native stream, or `None` to use the resolved URL.
     async fn open_stream(
@@ -886,6 +898,7 @@ fn remote_source(db: Db, source: Source, conn: &ServerConn) -> Box<dyn MediaSour
             ))
         }
         MusicService::Spotify => Box::new(SpotifySource::new(db, source, conn)),
+        MusicService::Qobuz => Box::new(qobuz::QobuzSource::new(db, source, conn)),
         MusicService::Nextcloud => Box::new(NextcloudSource::new(db, source, conn)),
         MusicService::Clippsly => Box::new(ClippslySource::new(db, source, conn)),
         MusicService::Smb => Box::new(SmbSource::new(db, source, conn)),

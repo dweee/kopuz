@@ -679,6 +679,7 @@ impl ClassifiedLoad {
                 // The fallback resolve blocks on the runtime captured here;
                 // this closure executes on the runtime-less decode worker.
                 let rt_handle = tokio::runtime::Handle::current();
+                let playback_token = self.token;
                 Box::new(move || match player::decoder::open_file(&path) {
                     Ok(parts) => Ok(parts),
                     Err(error) => {
@@ -693,7 +694,7 @@ impl ClassifiedLoad {
                             return Ok(player::decoder::from_stream(stream));
                         }
                         let info = rt_handle
-                            .block_on(source.resolve_stream(&item_id))
+                            .block_on(source.resolve_stream_for_playback(&item_id, playback_token))
                             .map_err(|error| error.to_string())?;
                         network_factory(
                             info.url,
@@ -714,13 +715,16 @@ impl ClassifiedLoad {
                             token: self.token,
                             message: "no active source for remote track".to_string(),
                         })?;
-                        let info = source.resolve_stream(item_id).await.map_err(|error| {
-                            tracing::error!(error = %error, "stream URL resolve failed");
-                            LoadFailure {
-                                token: self.token,
-                                message: error.to_string(),
-                            }
-                        })?;
+                        let info = source
+                            .resolve_stream_for_playback(item_id, self.token)
+                            .await
+                            .map_err(|error| {
+                                tracing::error!(error = %error, "stream URL resolve failed");
+                                LoadFailure {
+                                    token: self.token,
+                                    message: error.to_string(),
+                                }
+                            })?;
                         duration_secs = info.duration_secs;
                         bitrate = info.bitrate;
                         loudness_db = info.loudness_db;

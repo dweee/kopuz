@@ -348,6 +348,15 @@ pub trait ReadStore: Send + Sync {
         user_id: Option<&str>,
     ) -> Result<(), DbError>;
 
+    /// Atomically rotate an opaque credential only if the same account session is
+    /// still stored. A stale request must not overwrite a later sign-in/logout.
+    async fn rotate_server_credentials(
+        &self,
+        id: &str,
+        previous: &str,
+        next: &str,
+    ) -> Result<bool, DbError>;
+
     /// What the lyrics cache holds for `cache_key`.
     async fn cached_lyrics(&self, cache_key: &str) -> Result<Option<CachedLyrics>, DbError>;
 

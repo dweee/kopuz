@@ -749,6 +749,7 @@ fn is_remote_track(track_path: &str) -> bool {
         "ytmusic:",
         "soundcloud:",
         "spotify:",
+        "qobuz:",
         "nextcloud:",
     ]
     .iter()
@@ -1217,6 +1218,7 @@ mod tests {
             "ytmusic:r9jGBwgzEzA",
             "spotify:4uLU6hMCjMI75M1A2tKUQC",
             "soundcloud:123",
+            "qobuz:42",
             "nextcloud:files/song.mp3",
             "jellyfin:abc",
         ] {

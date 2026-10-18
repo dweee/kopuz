@@ -172,6 +172,7 @@ fn icon(service: MusicService) -> Icon {
         MusicService::SoundCloud => Icon::Class("fa-brands fa-soundcloud".into()),
         MusicService::AppleMusic => Icon::Class("fa-brands fa-apple".into()),
         MusicService::Spotify => Icon::Class("fa-brands fa-spotify".into()),
+        MusicService::Qobuz => Icon::Class("fa-solid fa-record-vinyl".into()),
         MusicService::Jellyfin => Icon::Class("fa-solid fa-server".into()),
         MusicService::Subsonic | MusicService::Custom => {
             Icon::Class("fa-solid fa-compact-disc".into())
@@ -188,6 +189,7 @@ fn accent(service: MusicService) -> &'static str {
         MusicService::SoundCloud => "#ff7a33",
         MusicService::AppleMusic => "#ffffff",
         MusicService::Spotify => "#1DB954",
+        MusicService::Qobuz => "#1879c9",
         MusicService::Jellyfin => "#b277ee",
         MusicService::Subsonic | MusicService::Custom => "#f0a84b",
         MusicService::Nextcloud => "#0082c9",
@@ -364,6 +366,23 @@ pub fn add_fields(service: MusicService) -> Vec<FieldSpec> {
             },
             browser_field(None, Some(FieldValue::new(AUTH_METHOD, BY_BROWSER))),
         ],
+        MusicService::Qobuz => vec![
+            FieldSpec {
+                key: CLIENT_ID.into(),
+                label: Text::literal("Qobuz application ID (optional)"),
+                help: Some(Text::literal(
+                    "Leave both application fields empty to discover the web-player credentials, or supply your authorized application ID and secret. Your Qobuz email and password are requested next.",
+                )),
+                kind: FieldKind::Text,
+                ..Default::default()
+            },
+            FieldSpec {
+                key: TOKEN.into(),
+                label: Text::literal("Qobuz application secret (optional)"),
+                kind: FieldKind::Secret,
+                ..Default::default()
+            },
+        ],
         MusicService::Spotify => vec![
             FieldSpec {
                 required: true,
@@ -502,7 +521,10 @@ pub fn settings(server: &ServerView<'_>, config: &AppConfig) -> Vec<FieldSpec> {
 /// The line under a source's name.
 pub fn detail(server: &ServerView<'_>) -> Option<String> {
     match server.service {
-        MusicService::Spotify | MusicService::YtMusic | MusicService::SoundCloud => None,
+        MusicService::Spotify
+        | MusicService::Qobuz
+        | MusicService::YtMusic
+        | MusicService::SoundCloud => None,
         MusicService::AppleMusic => Some(server.storefront.to_uppercase()),
         _ => Some(server.url.to_string()),
     }
@@ -538,6 +560,18 @@ pub fn check(service: MusicService, draft: &SourceDraft) -> (SignInKind, Vec<Pro
     }
     let value = |key: &str| value_of(&draft.values, key).unwrap_or_default().trim();
     match service {
+        MusicService::Qobuz => {
+            let app_id = value(CLIENT_ID);
+            let secret = value_of(&draft.secrets, TOKEN).unwrap_or_default().trim();
+            if app_id.is_empty() != secret.is_empty() {
+                problems.push(Problem::on(
+                    CLIENT_ID,
+                    Text::literal(
+                        "Supply both Qobuz application fields or leave both empty for discovery",
+                    ),
+                ));
+            }
+        }
         MusicService::Spotify => {
             if value(CLIENT_ID).is_empty() {
                 problems.push(Problem::on(
@@ -589,7 +623,7 @@ pub fn apply(service: MusicService, draft: &SourceDraft, saved: &mut SavedServer
     saved.name = draft.name.trim().to_string();
     saved.url = match service {
         // Spotify's address field holds the client id its PKCE flow needs.
-        MusicService::Spotify => value(CLIENT_ID),
+        MusicService::Spotify | MusicService::Qobuz => value(CLIENT_ID),
         MusicService::Clippsly => server::clippsly::BASE_URL.to_string(),
         _ => value(URL).trim_end_matches('/').to_string(),
     };
@@ -668,6 +702,38 @@ pub fn problem_text(problem: &Problem) -> String {
 #[cfg(test)]
 mod webview_tests {
     use super::*;
+
+    #[test]
+    fn qobuz_form_allows_discovery_and_requires_complete_explicit_pair() {
+        let mut draft = SourceDraft {
+            name: "Qobuz".into(),
+            service: "qobuz".into(),
+            ..Default::default()
+        };
+        let (sign_in, problems) = check(MusicService::Qobuz, &draft);
+        assert_eq!(sign_in, SignInKind::Password);
+        assert!(problems.is_empty());
+        assert!(!MusicService::Qobuz.uses_browser_signin());
+        draft.values.push(FieldValue::new(CLIENT_ID, "fixture-app"));
+        assert!(!check(MusicService::Qobuz, &draft).1.is_empty());
+        draft.secrets.push(FieldValue::new(TOKEN, "fixture-secret"));
+        assert!(check(MusicService::Qobuz, &draft).1.is_empty());
+        let mut saved = SavedServer::new(String::new(), String::new(), MusicService::Jellyfin);
+        apply(MusicService::Qobuz, &draft, &mut saved);
+        assert_eq!(saved.url, "fixture-app");
+        assert!(
+            !serde_json::to_string(&saved)
+                .unwrap()
+                .contains("fixture-secret")
+        );
+        assert!(
+            add_fields(MusicService::Qobuz)
+                .iter()
+                .any(|field| field.key == TOKEN
+                    && field.kind == FieldKind::Secret
+                    && field.value.is_none())
+        );
+    }
 
     #[test]
     fn android_forms_have_no_external_browser_or_registered_app_setup() {

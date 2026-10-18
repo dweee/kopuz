@@ -128,6 +128,7 @@ pub fn shutdown() {
     };
     let session = core.session.clone();
     let config = core.config_service.clone();
+    let scrobbler = core.scrobbler.clone();
     // Dioxus forbids block_on inside its runtime, so the flush gets a thread.
     let flush = std::thread::spawn(move || {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -137,6 +138,7 @@ pub fn shutdown() {
             return;
         };
         runtime.block_on(async move {
+            scrobbler.shutdown_reports().await;
             daemon::boot::flush_volume(&session, &config).await;
             session.persist_now().await;
         });

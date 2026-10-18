@@ -764,3 +764,67 @@ async fn the_single_and_bulk_artist_covers_agree_for_every_artist() {
     assert_eq!(bulk.get("UC-boris").map(String::as_str), Some("/a2.jpg"));
     assert_eq!(bulk.len(), 2);
 }
+
+#[tokio::test]
+async fn qobuz_session_rotation_preserves_new_signins_and_logout() {
+    let db = db::init(&unique_db()).await.unwrap();
+    let mut cfg = server(Some("old-session"));
+    cfg.servers[0].service = MusicService::Qobuz;
+    cfg.server.as_mut().unwrap().service = MusicService::Qobuz;
+    cfg.servers[0].url.clear();
+    cfg.server.as_mut().unwrap().url.clear();
+    db.save_config(&cfg).await.unwrap();
+    db.set_server_credentials("s1", Some("old-session"), Some("u1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        db.load_server("s1").await.unwrap().unwrap().service,
+        MusicService::Qobuz
+    );
+    assert!(
+        db.rotate_server_credentials("s1", "old-session", "rotated-session")
+            .await
+            .unwrap()
+    );
+    db.save_config(&cfg).await.unwrap();
+    assert_eq!(
+        db.load_server("s1")
+            .await
+            .unwrap()
+            .unwrap()
+            .access_token
+            .as_deref(),
+        Some("rotated-session")
+    );
+    assert!(
+        !db.rotate_server_credentials("s1", "old-session", "stale-request")
+            .await
+            .unwrap()
+    );
+    db.set_server_credentials("s1", Some("new-account"), Some("new-user"))
+        .await
+        .unwrap();
+    assert!(
+        !db.rotate_server_credentials("s1", "rotated-session", "old-account")
+            .await
+            .unwrap()
+    );
+    let current = db.load_server("s1").await.unwrap().unwrap();
+    assert_eq!(current.access_token.as_deref(), Some("new-account"));
+    assert_eq!(current.user_id.as_deref(), Some("new-user"));
+    db.set_server_credentials("s1", None, None).await.unwrap();
+    db.save_config(&cfg).await.unwrap();
+    assert!(
+        !db.rotate_server_credentials("s1", "new-account", "resurrected-account")
+            .await
+            .unwrap()
+    );
+    assert!(
+        db.load_server("s1")
+            .await
+            .unwrap()
+            .unwrap()
+            .access_token
+            .is_none()
+    );
+}

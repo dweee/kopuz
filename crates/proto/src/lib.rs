@@ -6,7 +6,8 @@
 //! own types: every `api` value must survive api -> proto -> api unchanged.
 
 mod generated {
-    #![allow(clippy::large_enum_variant)]
+    // Tonic controls these generated signatures and returns its unboxed Status.
+    #![allow(clippy::large_enum_variant, clippy::result_large_err)]
     tonic::include_proto!("kopuz.v1");
 }
 pub use generated::*;

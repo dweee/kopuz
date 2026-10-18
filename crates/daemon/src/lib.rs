@@ -24,6 +24,7 @@ pub mod ownership;
 pub mod persistence;
 mod playback;
 pub mod playlists;
+mod qobuz;
 pub mod queue_model;
 pub mod radio;
 pub mod script_engine;

@@ -2603,8 +2603,16 @@ async fn gapless_switches_on_the_last_sample_of_the_outgoing_track() {
         if state.queue.index == Some(1) {
             assert!(matches!(state.intent, Intent::Committed { token: 2 }));
             assert!(state.fading.is_none());
+            assert_eq!(harness.api.session.audible_state().primary, Some(2));
             break;
         }
+        let audible = harness.api.session.audible_state();
+        assert_eq!(
+            audible.primary,
+            Some(1),
+            "queued incoming intent must not replace the audible accounting token"
+        );
+        assert!(audible.playing);
         assert_eq!(
             state.track.as_ref().map(|track| track.title.as_str()),
             Some("short-a")
@@ -2674,6 +2682,13 @@ async fn failed_gapless_preload_retries_only_after_the_outgoing_track_ends() {
         state.error.is_some() && state.intent == Intent::Committed { token: 1 }
     })
     .await;
+    let audible = harness.api.session.audible_state();
+    assert_eq!(
+        audible.primary,
+        Some(1),
+        "a failed next-track preload must not stop the current listen"
+    );
+    assert!(audible.playing);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             harness.sink.pull(2048);

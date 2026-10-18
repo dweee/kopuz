@@ -20,6 +20,7 @@ const NOW_PLAYING_MAX_IDLE_SECS: u64 = 600;
 pub struct Scrobbler {
     db: db::Db,
     session: OnceLock<SessionHandle>,
+    qobuz: crate::qobuz::Reporter,
 }
 
 fn listen_additional_info(
@@ -58,11 +59,16 @@ impl Scrobbler {
         Arc::new(Self {
             db,
             session: OnceLock::new(),
+            qobuz: crate::qobuz::Reporter::new(),
         })
     }
 
     pub fn attach_session(&self, session: SessionHandle) {
         let _ = self.session.set(session);
+    }
+
+    pub async fn shutdown_reports(&self) {
+        self.qobuz.shutdown().await;
     }
 
     fn session(&self) -> Option<&SessionHandle> {
@@ -105,6 +111,7 @@ impl Scrobbler {
             return;
         };
         let config = session.config_watch().borrow().clone();
+        self.qobuz.committed(session.clone(), &track, token);
         let uid = track.id.uid();
         let item_ref = PlaybackItemRef::parse(&uid);
         if item_ref.is_radio() {

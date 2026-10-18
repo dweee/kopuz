@@ -262,14 +262,20 @@ async fn sync_servers(tx: &mut sqlx::SqliteConnection, cfg: &AppConfig) -> Resul
             &srv.apple_music_language,
         );
         write_server_options(tx, &id, &options).await?;
-        write_server_credentials(
-            tx,
-            &id,
-            srv.access_token.as_deref(),
-            srv.user_id.as_deref(),
-            now,
-        )
-        .await?;
+        // Qobuz may rotate its discovered application credentials during a
+        // source request. Its dedicated provisioning/CAS APIs own the secret
+        // row; an unrelated settings or volume save carries an older snapshot
+        // and must not undo that rotation or resurrect a logged-out account.
+        if srv.service != MusicService::Qobuz {
+            write_server_credentials(
+                tx,
+                &id,
+                srv.access_token.as_deref(),
+                srv.user_id.as_deref(),
+                now,
+            )
+            .await?;
+        }
         active_id = Some(id);
     }
 
@@ -734,6 +740,7 @@ fn parse_service(s: &str) -> MusicService {
         "SoundCloud" => MusicService::SoundCloud,
         "AppleMusic" => MusicService::AppleMusic,
         "Spotify" => MusicService::Spotify,
+        "Qobuz" => MusicService::Qobuz,
         "Nextcloud" => MusicService::Nextcloud,
         "Clippsly" => MusicService::Clippsly,
         "Smb" => MusicService::Smb,
@@ -750,6 +757,7 @@ fn service_str(s: MusicService) -> &'static str {
         MusicService::SoundCloud => "SoundCloud",
         MusicService::AppleMusic => "AppleMusic",
         MusicService::Spotify => "Spotify",
+        MusicService::Qobuz => "Qobuz",
         MusicService::Nextcloud => "Nextcloud",
         MusicService::Clippsly => "Clippsly",
         MusicService::Smb => "Smb",

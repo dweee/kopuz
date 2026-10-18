@@ -249,10 +249,25 @@ enum SessionCmd {
     },
 }
 
+/// Internal engine truth for accounting integrations. Queue intent can already
+/// name a preloaded next track while the engine is still playing its predecessor.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AudibleState {
+    pub primary: Option<u64>,
+    pub fading: Option<u64>,
+    pub playing: bool,
+}
+impl AudibleState {
+    pub fn contains(self, token: u64) -> bool {
+        self.primary == Some(token) || self.fading == Some(token)
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionHandle {
     cmd_tx: mpsc::UnboundedSender<SessionCmd>,
     state_rx: watch::Receiver<PlayerState>,
+    audible_rx: watch::Receiver<AudibleState>,
     config_rx: watch::Receiver<config::AppConfig>,
     events: broadcast::Sender<ApiEvent>,
     materializer: Arc<dyn QueueMaterializer>,
@@ -284,6 +299,7 @@ impl SessionHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (config_tx, config_rx) = watch::channel(services.config.clone());
+        let (audible_tx, audible_rx) = watch::channel(AudibleState::default());
         let engine_events = player.subscribe();
         player.set_volume(match services.config.muted {
             true => 0.0,
@@ -305,6 +321,7 @@ impl SessionHandle {
         let session = Session {
             model: QueueModel::default(),
             player,
+            audible_tx,
             intent: PlaybackIntent::Stopped,
             next_token: 0,
             current_token: 0,
@@ -350,6 +367,7 @@ impl SessionHandle {
         Self {
             cmd_tx,
             state_rx,
+            audible_rx,
             config_rx,
             events,
             materializer,
@@ -366,6 +384,10 @@ impl SessionHandle {
         factory_override: FactoryOverride,
     ) -> Self {
         Self::spawn_inner(materializer, player, services, Some(factory_override))
+    }
+
+    pub(crate) fn audible_state(&self) -> AudibleState {
+        *self.audible_rx.borrow()
     }
 
     pub fn state(&self) -> PlayerState {
@@ -663,6 +685,7 @@ struct PendingTransition {
 struct Session {
     model: QueueModel,
     player: Player,
+    audible_tx: watch::Sender<AudibleState>,
     intent: PlaybackIntent,
     next_token: u64,
     current_token: u64,

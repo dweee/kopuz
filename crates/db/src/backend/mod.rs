@@ -357,6 +357,17 @@ impl ReadStore for Native {
         cfg_store::set_server_credentials(&self.pool(), id, access_token, user_id).await
     }
 
+    async fn rotate_server_credentials(
+        &self,
+        id: &str,
+        previous: &str,
+        next: &str,
+    ) -> Result<bool, DbError> {
+        let changed = sqlx::query("UPDATE server_credentials SET access_token = ?1, updated_at = unixepoch() WHERE server_id = ?2 AND access_token = ?3")
+            .bind(next).bind(id).bind(previous).execute(&*self.pool()).await?.rows_affected();
+        Ok(changed == 1)
+    }
+
     async fn cached_lyrics(&self, cache_key: &str) -> Result<Option<crate::CachedLyrics>, DbError> {
         dump::cached_lyrics(&self.pool(), cache_key).await
     }

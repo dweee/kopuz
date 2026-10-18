@@ -254,7 +254,13 @@ impl SourceService {
                 info.service = crate::services::service_ref(server.service);
                 // An anonymous source needs no token to be usable, which is
                 // why this is not simply "has a token".
-                info.authenticated = server.access_token.is_some() || server.yt_anonymous;
+                info.authenticated = if server.service == config::MusicService::Qobuz {
+                    server.access_token.as_deref().is_some_and(|packed| {
+                        server::qobuz::QobuzClient::from_session(packed).is_ok()
+                    })
+                } else {
+                    server.access_token.is_some() || server.yt_anonymous
+                };
                 info.sign_in = crate::services::sign_in(&view, info.authenticated);
                 // What signing in again takes, for credentials that went stale.
                 info.reauth = crate::services::sign_in(&view, false);
@@ -538,8 +544,21 @@ impl SourceService {
             return self
                 .provision_credentials(api::CredentialProvision {
                     server_id: id,
-                    secret,
-                    user_id: Some("me".to_string()),
+                    secret: if service == config::MusicService::Qobuz {
+                        server::qobuz::pending_credentials(
+                            api::schema::value_of(&draft.values, crate::services::CLIENT_ID)
+                                .unwrap_or_default()
+                                .trim(),
+                            &secret,
+                        )
+                    } else {
+                        secret
+                    },
+                    user_id: if service == config::MusicService::Qobuz {
+                        None
+                    } else {
+                        Some("me".to_string())
+                    },
                     browser: None,
                 })
                 .await;
@@ -731,7 +750,26 @@ impl SourceService {
             .await
             .map_err(db_error)?
             .ok_or_else(|| ApiError::not_found("no such server"))?;
-        let auth = if server.service == config::MusicService::Clippsly {
+        let auth = if server.service == config::MusicService::Qobuz {
+            let pair = server
+                .access_token
+                .as_deref()
+                .and_then(server::qobuz::app_credentials);
+            let client = server::qobuz::QobuzClient::login(
+                request.username.trim(),
+                &request.password,
+                pair.as_ref().map(|pair| pair.0.as_str()),
+                pair.as_ref().map(|pair| pair.1.as_str()),
+            )
+            .await
+            .map_err(|error| ApiError::new(ErrorCode::SourceAuthExpired, error.to_string()))?;
+            server::provider::AuthSession {
+                access_token: client
+                    .pack_session()
+                    .map_err(|e| ApiError::internal(e.to_string()))?,
+                user_id: client.user_id().to_owned(),
+            }
+        } else if server.service == config::MusicService::Clippsly {
             let client = server::clippsly::ClippslyClient::new(&server.url, &request.password)
                 .map_err(source_error)?;
             let account = client.account().await.map_err(source_error)?;

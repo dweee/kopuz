@@ -49,6 +49,8 @@ fn resync_message() -> proto::EventEnvelope {
 }
 
 impl KopuzGrpc {
+    // Keep the same unboxed Status as the tonic service boundary.
+    #[allow(clippy::result_large_err)]
     async fn player_mutation(
         &self,
         command: api::PlayerCommand,

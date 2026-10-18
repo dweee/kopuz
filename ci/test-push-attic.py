@@ -28,13 +28,13 @@ class AtticPublicationTests(unittest.TestCase):
         self.binary.write_text('#!/bin/sh\nexit 0\n')
         self.binary.chmod(0o700)
         self.secret = 'synthetic-test-token-with-"quote"-and-\\slash'
-        self.env = {'ATTIC_ENDPOINT': 'https://cache.example.test/prefix', 'ATTIC_CACHE': 'packages',
+        self.env = {'ATTIC_ENDPOINT': 'https://attic.monke.fail', 'ATTIC_CACHE': 'flakey',
                     'ATTIC_TOKEN': self.secret, 'ATTIC_BIN': str(self.binary),
                     'RUNNER_TEMP': str(self.root), 'GITHUB_STEP_SUMMARY': str(self.root / 'summary')}
         self.checked_dirs = []
 
     def inspect_invocation(self, args, *, input, text, env, check):
-        self.assertEqual(args, [str(self.binary), 'push', '--jobs', '1', '--stdin', 'ci:packages'])
+        self.assertEqual(args, [str(self.binary), 'push', '--jobs', '1', '--stdin', 'ci:flakey'])
         self.assertEqual(input.splitlines(), self.paths)
         self.assertTrue(text and check)
         self.assertNotIn('ATTIC_TOKEN', env)
@@ -72,7 +72,7 @@ class AtticPublicationTests(unittest.TestCase):
                  ('ATTIC_ENDPOINT', 'https://cache.example.test/?token=fixture'),
                  ('ATTIC_ENDPOINT', 'https://cache.example.test/#fragment'),
                  ('ATTIC_ENDPOINT', 'https://cache.example.test:99999'),
-                 ('ATTIC_ENDPOINT', ''), ('ATTIC_CACHE', ''), ('ATTIC_CACHE', 'other:cache'),
+                 ('ATTIC_ENDPOINT', 'https://cache.example.test'), ('ATTIC_CACHE', 'other'), ('ATTIC_ENDPOINT', ''), ('ATTIC_CACHE', ''), ('ATTIC_CACHE', 'other:cache'),
                  ('ATTIC_CACHE', '../cache'), ('ATTIC_TOKEN', ''), ('ATTIC_BIN', '/missing/attic')]
         for name, value in cases:
             with self.subTest(name=name, value=value), patch.dict(os.environ, self.env | {name: value}, clear=True), patch.object(module.subprocess, 'run') as call:

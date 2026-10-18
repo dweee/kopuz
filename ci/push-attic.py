@@ -24,6 +24,8 @@ def publish(outputs):
         raise ValueError("ATTIC_ENDPOINT must be an HTTPS server URL without credentials, query or fragment")
     # Accessing port also validates a malformed or out-of-range port.
     _ = parsed.port
+    if endpoint.rstrip("/") != "https://attic.monke.fail" or cache != "flakey":
+        raise ValueError("Only the private flakey destination is allowed")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", cache):
         raise ValueError("ATTIC_CACHE must name the existing destination cache")
     if not token.strip():

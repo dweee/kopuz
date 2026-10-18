@@ -31,10 +31,15 @@ jobs:
             experimental-features = nix-command flakes
             accept-flake-config = false
             substituters = https://cache.nixos.org/
-            extra-substituters = ${{ vars.ATTIC_SUBSTITUTER }}
-            extra-trusted-public-keys = ${{ vars.ATTIC_PUBLIC_KEY }}
+            extra-substituters =
+            extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=
             max-jobs = 1
             cores = 3
+      - name: Configure authenticated private cache reads for trusted builds
+        if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: python3 ci/configure-attic-read.py
       - name: Validate locale parity and frontend boundaries
         run: |
           nix shell --inputs-from . nixpkgs#nushell --command nu scripts/check_locales.nu
@@ -86,14 +91,21 @@ jobs:
             experimental-features = nix-command flakes
             accept-flake-config = false
             substituters = https://cache.nixos.org/
-            extra-substituters = ${{ vars.ATTIC_SUBSTITUTER }}
-            extra-trusted-public-keys = ${{ vars.ATTIC_PUBLIC_KEY }}
+            extra-substituters =
+            extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=
             max-jobs = 1
             cores = 3
+      - name: Configure authenticated private cache reads for trusted builds
+        if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: python3 ci/configure-attic-read.py
       - name: Validate credential-free publication helpers
         run: |
           python3 ci/test-push-attic.py
           python3 ci/test-transfer-attic.py
+          python3 ci/test-public-closure.py
+          python3 ci/test-configure-attic-read.py
       - name: Build native package and test Qobuz
         env:
           TARGET_SYSTEM: ${{ matrix.system }}
@@ -102,8 +114,10 @@ jobs:
           set -euo pipefail
           test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$TARGET_SYSTEM"
           target=".#packages.$TARGET_SYSTEM.$TARGET_PACKAGE"
+          python3 ci/public-closure.py "$target"
           SECONDS=0
           nix build "$target" --no-update-lock-file --no-write-lock-file --no-link --print-out-paths -L > outputs.txt
+          python3 ci/public-closure.py ".#checks.$TARGET_SYSTEM.qobuz"
           nix build ".#checks.$TARGET_SYSTEM.qobuz" --no-update-lock-file --no-write-lock-file --no-link -L
           {
             echo "Built $TARGET_PACKAGE for $TARGET_SYSTEM"
@@ -125,7 +139,7 @@ jobs:
           overwrite: false
   publish:
     needs: build
-    if: ${{ vars.ATTIC_PUSH_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/flakey' }}
+    if: ${{ vars.ATTIC_PUSH_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     name: Publish ${{ matrix.package }} (${{ matrix.system }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -177,7 +191,7 @@ jobs:
         timeout-minutes: 30
         env:
           ATTIC_BIN: ${{ steps.attic.outputs.binary }}
-          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
-          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_ENDPOINT: https://attic.monke.fail
+          ATTIC_CACHE: flakey
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: python3 ci/push-attic.py --outputs attic-transfer/outputs.txt

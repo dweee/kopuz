@@ -10,7 +10,7 @@
     pkgsFor = system:
       import nixpkgs {
         inherit system;
-        config.allowUnfree = true;
+        config.allowUnfree = false;
       };
     packagesFor = system: let pkgs = pkgsFor system; in pkgs.callPackage ./nix/package.nix {gitRev = self.rev or self.dirtyRev or null;};
   in {

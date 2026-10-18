@@ -28,13 +28,17 @@ class AtticPublicationTests(unittest.TestCase):
         self.binary.write_text('#!/bin/sh\nexit 0\n')
         self.binary.chmod(0o700)
         self.secret = 'synthetic-test-token-with-"quote"-and-\\slash'
-        self.env = {'ATTIC_ENDPOINT': 'https://cache.example.test/prefix', 'ATTIC_CACHE': 'packages',
+        self.env = {'ATTIC_ENDPOINT': 'https://attic.monke.fail', 'ATTIC_CACHE': 'flakey',
                     'ATTIC_TOKEN': self.secret, 'ATTIC_BIN': str(self.binary),
                     'RUNNER_TEMP': str(self.root), 'GITHUB_STEP_SUMMARY': str(self.root / 'summary')}
         self.checked_dirs = []
 
     def inspect_invocation(self, args, *, input, text, env, check):
-        self.assertEqual(args, [str(self.binary), 'push', '--jobs', '1', '--stdin', 'ci:packages'])
+        expected = [str(self.binary), 'push', '--jobs', '1']
+        if not self.checked_dirs:
+            expected += ['--no-closure', '--ignore-upstream-cache-filter']
+        expected += ['--stdin', 'ci:flakey']
+        self.assertEqual(args, expected)
         self.assertEqual(input.splitlines(), self.paths)
         self.assertTrue(text and check)
         self.assertNotIn('ATTIC_TOKEN', env)
@@ -51,18 +55,33 @@ class AtticPublicationTests(unittest.TestCase):
     def test_exact_outputs_closures_permissions_and_cleanup(self):
         with patch.dict(os.environ, self.env, clear=True), patch.object(module.subprocess, 'run', side_effect=self.inspect_invocation):
             module.publish(self.outputs)
-        self.assertTrue(self.checked_dirs)
+        self.assertEqual(len(self.checked_dirs), 2)
+        self.assertEqual(self.checked_dirs[0], self.checked_dirs[1])
         self.assertTrue(all(not p.exists() for p in self.checked_dirs))
         self.assertIn('Uploaded 2 output(s) and runtime closures', (self.root / 'summary').read_text())
         self.assertNotIn(self.secret, (self.root / 'summary').read_text())
 
-    def test_failed_upload_is_not_success_and_cleans_credentials(self):
+    def test_failed_root_upload_blocks_closure_upload_and_cleans_credentials(self):
         def failure(*args, **kwargs):
             self.inspect_invocation(*args, **kwargs)
             raise subprocess.CalledProcessError(17, args[0])
-        with patch.dict(os.environ, self.env, clear=True), patch.object(module.subprocess, 'run', side_effect=failure):
+        with patch.dict(os.environ, self.env, clear=True), patch.object(module.subprocess, 'run', side_effect=failure) as call:
             with self.assertRaises(subprocess.CalledProcessError):
                 module.publish(self.outputs)
+            call.assert_called_once()
+        self.assertEqual(len(self.checked_dirs), 1)
+        self.assertTrue(all(not p.exists() for p in self.checked_dirs))
+        self.assertFalse((self.root / 'summary').exists())
+
+    def test_failed_dependency_upload_keeps_publication_red_and_cleans_credentials(self):
+        def upload(*args, **kwargs):
+            self.inspect_invocation(*args, **kwargs)
+            if len(self.checked_dirs) == 2:
+                raise subprocess.CalledProcessError(19, args[0])
+        with patch.dict(os.environ, self.env, clear=True), patch.object(module.subprocess, 'run', side_effect=upload) as call:
+            with self.assertRaises(subprocess.CalledProcessError):
+                module.publish(self.outputs)
+            self.assertEqual(call.call_count, 2)
         self.assertTrue(all(not p.exists() for p in self.checked_dirs))
         self.assertFalse((self.root / 'summary').exists())
 
@@ -72,7 +91,7 @@ class AtticPublicationTests(unittest.TestCase):
                  ('ATTIC_ENDPOINT', 'https://cache.example.test/?token=fixture'),
                  ('ATTIC_ENDPOINT', 'https://cache.example.test/#fragment'),
                  ('ATTIC_ENDPOINT', 'https://cache.example.test:99999'),
-                 ('ATTIC_ENDPOINT', ''), ('ATTIC_CACHE', ''), ('ATTIC_CACHE', 'other:cache'),
+                 ('ATTIC_ENDPOINT', 'https://cache.example.test'), ('ATTIC_CACHE', 'other'), ('ATTIC_ENDPOINT', ''), ('ATTIC_CACHE', ''), ('ATTIC_CACHE', 'other:cache'),
                  ('ATTIC_CACHE', '../cache'), ('ATTIC_TOKEN', ''), ('ATTIC_BIN', '/missing/attic')]
         for name, value in cases:
             with self.subTest(name=name, value=value), patch.dict(os.environ, self.env | {name: value}, clear=True), patch.object(module.subprocess, 'run') as call:

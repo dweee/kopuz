@@ -24,6 +24,8 @@ def publish(outputs):
         raise ValueError("ATTIC_ENDPOINT must be an HTTPS server URL without credentials, query or fragment")
     # Accessing port also validates a malformed or out-of-range port.
     _ = parsed.port
+    if endpoint.rstrip("/") != "https://attic.monke.fail" or cache != "flakey":
+        raise ValueError("Only the private flakey destination is allowed")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", cache):
         raise ValueError("ATTIC_CACHE must name the existing destination cache")
     if not token.strip():
@@ -49,8 +51,14 @@ def publish(outputs):
             config.write("endpoint = " + json.dumps(endpoint.rstrip("/") + "/") + "\n")
             config.write("token = " + json.dumps(token) + "\n")
         child_env["XDG_CONFIG_HOME"] = temporary
-        # Attic follows runtime closures by default. Only this manifest's roots
-        # are selected; the rest of the runner store is never enumerated.
+        # Selected roots must have narinfo in flakey even if they already
+        # carry an upstream signature. Limit this override to manifest roots.
+        subprocess.run([binary, "push", "--jobs", "1", "--no-closure",
+                        "--ignore-upstream-cache-filter", "--stdin", "ci:" + cache],
+                       input="\n".join(paths) + "\n", text=True, env=child_env, check=True)
+        # Keep normal upstream filtering for runtime dependencies. The rest of
+        # the runner store is never enumerated, and either upload failing fails
+        # publication rather than reporting an incompletely cached package.
         subprocess.run([binary, "push", "--jobs", "1", "--stdin", "ci:" + cache],
                        input="\n".join(paths) + "\n", text=True, env=child_env, check=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

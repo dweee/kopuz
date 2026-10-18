@@ -1,0 +1,183 @@
+name: Fork native builds
+"on":
+  push:
+    branches: [flakey]
+  pull_request:
+    branches: [flakey]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kopuz-native-${{ github.ref }}-kopuz
+  cancel-in-progress: false
+jobs:
+  quality:
+    if: ${{ vars.DAVE_FORK_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Reclaim unused hosted Linux SDK space
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: "2.34.7"
+          enable_kvm: false
+          nix_conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+            substituters = https://cache.nixos.org/
+            extra-substituters = ${{ vars.ATTIC_SUBSTITUTER }}
+            extra-trusted-public-keys = ${{ vars.ATTIC_PUBLIC_KEY }}
+            max-jobs = 1
+            cores = 3
+      - name: Validate locale parity and frontend boundaries
+        run: |
+          nix shell --inputs-from . nixpkgs#nushell --command nu scripts/check_locales.nu
+          nix shell --inputs-from . nixpkgs#nushell --command nu scripts/check_i18n_usage.nu
+          nix shell --inputs-from . nixpkgs#nushell --command nu scripts/check_frontend_sources.nu
+      - name: Format and lint both compilation modes
+        env:
+          CARGO_BUILD_JOBS: "3"
+        run: |
+          nix develop --no-update-lock-file --no-write-lock-file --command bash -euc '
+            gitleaks git --redact --no-banner --log-opts=552400339461ef09c09d4db133bf356ea8fead18..HEAD .
+            cargo fmt --all -- --check
+            cargo clippy --workspace --all-targets -- -D warnings
+            rm -rf target/debug
+            cargo clippy --workspace --all-targets --release -- -D warnings
+          '
+  build:
+    needs: quality
+    name: Kopuz (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+            package: default
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+            package: default
+          - runner: macos-15
+            system: aarch64-darwin
+            package: default
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Reclaim unused hosted Linux SDK space
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: "2.34.7"
+          enable_kvm: false
+          nix_conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+            substituters = https://cache.nixos.org/
+            extra-substituters = ${{ vars.ATTIC_SUBSTITUTER }}
+            extra-trusted-public-keys = ${{ vars.ATTIC_PUBLIC_KEY }}
+            max-jobs = 1
+            cores = 3
+      - name: Validate credential-free publication helpers
+        run: |
+          python3 ci/test-push-attic.py
+          python3 ci/test-transfer-attic.py
+      - name: Build native package and test Qobuz
+        env:
+          TARGET_SYSTEM: ${{ matrix.system }}
+          TARGET_PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$TARGET_SYSTEM"
+          target=".#packages.$TARGET_SYSTEM.$TARGET_PACKAGE"
+          SECONDS=0
+          nix build "$target" --no-update-lock-file --no-write-lock-file --no-link --print-out-paths -L > outputs.txt
+          nix build ".#checks.$TARGET_SYSTEM.qobuz" --no-update-lock-file --no-write-lock-file --no-link -L
+          {
+            echo "Built $TARGET_PACKAGE for $TARGET_SYSTEM"
+            echo "Package build: ${SECONDS}s"
+            cat outputs.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save selected runtime closures independently of cache publication
+        timeout-minutes: 15
+        env:
+          ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '4096' }}
+        run: python3 ci/transfer-attic.py export --directory attic-transfer
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nix-${{ matrix.system }}-${{ matrix.package }}-${{ github.sha }}
+          path: attic-transfer/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: false
+  publish:
+    needs: build
+    if: ${{ vars.ATTIC_PUSH_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/flakey' }}
+    name: Publish ${{ matrix.package }} (${{ matrix.system }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+            package: default
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+            package: default
+          - runner: macos-15
+            system: aarch64-darwin
+            package: default
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: "2.34.7"
+          enable_kvm: false
+          nix_conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+            substituters = https://cache.nixos.org/
+            extra-substituters =
+      - name: Install the trusted pinned Attic client before importing build data
+        id: attic
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          client=$(nix build --inputs-from . 'nixpkgs#attic-client' --no-update-lock-file --no-write-lock-file --no-link --print-out-paths --max-jobs 0 --builders "")
+          test -x "$client/bin/attic"
+          echo "binary=$client/bin/attic" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nix-${{ matrix.system }}-${{ matrix.package }}-${{ github.sha }}
+          path: attic-transfer
+      - name: Import data without running any package programs
+        timeout-minutes: 15
+        env:
+          ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '4096' }}
+        run: python3 ci/transfer-attic.py import --directory attic-transfer
+      - name: Publish imported package outputs to Attic
+        timeout-minutes: 30
+        env:
+          ATTIC_BIN: ${{ steps.attic.outputs.binary }}
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: python3 ci/push-attic.py --outputs attic-transfer/outputs.txt

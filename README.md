@@ -664,6 +664,52 @@ A signed-in Music Premium account gets its higher-quality streams through
 Kopuz's own YouTube client, for playback and downloads alike. Anonymous mode
 can't play Premium-only content at all.
 
+## Qobuz Setup
+
+Add **Qobuz** in **Settings → Media servers**. Leave both application fields
+empty to discover the current web-player application credentials. After saving,
+sign in with your Qobuz email and password. If discovery is unavailable, remove
+that unconfigured source and add it again with your authorized Qobuz application
+ID and application secret in the two optional fields. Both fields must be set
+together; the secret is write-only.
+Sign-in validates the account and application ID. The signing secret is checked
+when you request an actual track, without probing an unrelated catalog track.
+
+Qobuz plays directly through Kopuz's audio engine, without a browser playback
+window. It requests the highest available stream quality (format 27), falling
+back through 7, 6 and 5 when a format is unavailable. It rejects preview/sample
+streams, keeps authentication and rate-limit failures distinct from quality
+fallback, and resolves expiring media URLs afresh. An expired account token
+requires another sign-in; your password is never stored. Discovered application
+credentials can rotate once per rejected request, with bounded discovery.
+
+The source includes catalog track/album search, album tracks, artist albums,
+favorited albums/tracks, and playlists with create/add/remove operations. Its
+account and favorites remain separate from other sources. Purchases, catalog
+recommendations, offline downloads, and Qobuz Connect are not currently exposed.
+Qobuz tracks use Kopuz's existing timed-lyrics providers and word highlighting.
+
+The account token and application secret stay in Kopuz's credential database;
+`settings.toml`, drop-ins and environment setting overrides do not accept source
+credentials. Native royalty reporting starts only when the exact resolved engine
+session becomes audible, counts listened wall time excluding pauses/seeks, and
+reports completion on track change, stop or orderly shutdown. Reports are best
+effort, with a bounded completion retry and stable per-play context; resolving or
+preloading a track does not submit a listen.
+
+The protocol implementation was written against the behavior demonstrated by
+[Music Assistant's Qobuz provider](https://github.com/music-assistant/server/blob/2.10.6/music_assistant/providers/qobuz/__init__.py),
+[qobuz-dl](https://github.com/vitiko98/qobuz-dl), and
+[ricercar-qconnect](https://github.com/anon7627/ricercar-qconnect).
+The backend includes local HTTP fixtures for signing, authentication, pagination,
+quality fallback, expiry and reporting; no account is required to run them:
+
+```sh
+SQLX_OFFLINE=true cargo test -p kopuz-server --lib qobuz
+SQLX_OFFLINE=true cargo test -p kopuz-daemon --lib qobuz
+SQLX_OFFLINE=true cargo test -p kopuz-db --test normalized qobuz
+```
+
 ## SoundCloud Setup
 
 Kopuz can use SoundCloud as a streaming backend. Add it from **Settings → Media
@@ -985,3 +1031,41 @@ European Union Public Licence v. 1.2. The source code is available at
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=Kopuz-org/kopuz&type=date&legend=top-left)](https://star-history.dera.page/#Kopuz-org/kopuz&type=date&legend=top-left)
+
+## Fork packaging and continuous integration
+
+This fork adds native Qobuz sources to Kopuz. The default fork branch is
+`flakey`; upstream release automation is replaced by native Nix checks and builds.
+
+Build or run the fork on Linux (x86-64 or ARM64) and Apple Silicon macOS:
+
+```sh
+nix build github:dweee/kopuz/flakey
+nix run github:dweee/kopuz/flakey
+nix develop
+```
+
+A NixOS or nix-darwin flake can add `inputs.kopuz.url =
+"github:dweee/kopuz/flakey"` and install
+`inputs.kopuz.packages.${pkgs.stdenv.hostPlatform.system}.default` in
+`environment.systemPackages`. Pin the input in your own lock file. The package
+uses the upstream build recipe and a stable dependency cache, then builds the
+fork source. It includes the GUI, daemon and command-line client; it does not
+include account credentials.
+
+Set repository variable `DAVE_FORK_CI_ENABLED=true` to enable GitHub Actions
+builds on native hosted Linux x86-64, Linux ARM64 and Apple Silicon runners. A redacted secret scan of fork commits, formatting, debug/release workspace
+Clippy and Qobuz fixture
+tests gate publication. Runtime closures are uploaded as one-day artifacts.
+A separate publisher imports those closures without executing package programs;
+only its final upload step receives the cache credential. Pull requests never
+receive upload credentials. This workflow publishes Nix closures, not signed
+platform installers or upstream releases.
+
+Optional cache publication uses repository variable `ATTIC_PUSH_ENABLED=true`,
+variables `ATTIC_ENDPOINT`, `ATTIC_CACHE`, and secret `ATTIC_TOKEN` (restricted
+to upload only to that cache). Optional read-only cache settings are
+`ATTIC_SUBSTITUTER` and `ATTIC_PUBLIC_KEY`. `ATTIC_MAX_CLOSURE_MIB` defaults to
+4096. Store endpoint addresses and credentials in repository settings rather
+than this source tree. GitHub is the primary CI; a Forgejo mirror can retain the
+same source without needing a publicly named private runner.

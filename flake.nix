@@ -1,97 +1,34 @@
 {
-  description = "Kopuz - A modern music player";
-
-  inputs = {
-    nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
-    crane.url = "github:ipetkov/crane";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+  description = "Kopuz with native Qobuz support";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/7fd4004d0511991fff3a0524856a9be09e28c5f0";
+  outputs = {
+    self,
+    nixpkgs,
+    ...
+  }: let
+    systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin"];
+    pkgsFor = system:
+      import nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
+      };
+    packagesFor = system: let pkgs = pkgsFor system; in pkgs.callPackage ./nix/package.nix {gitRev = self.rev or self.dirtyRev or null;};
+  in {
+    packages = nixpkgs.lib.genAttrs systems (system: {
+      default = packagesFor system;
+      kopuz = packagesFor system;
+    });
+    checks = nixpkgs.lib.genAttrs systems (system: {qobuz = (packagesFor system).qobuzTests;});
+    devShells = nixpkgs.lib.genAttrs systems (system: let
+      pkgs = pkgsFor system;
+      app = packagesFor system;
+    in {
+      default = pkgs.mkShell {
+        inputsFrom = [app.buildPackage];
+        packages = with pkgs; [cargo rustc rustfmt clippy clang gitleaks];
+        RUSTY_V8_ARCHIVE = app.RUSTY_V8_ARCHIVE;
+        SQLX_OFFLINE = "true";
+      };
+    });
   };
-
-  outputs =
-    {
-      self,
-      nixpkgs,
-      rust-overlay,
-      crane,
-    }:
-    let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
-      ];
-      forAllSystems = nixpkgs.lib.genAttrs systems;
-      pkgsForEach = system: nixpkgs.legacyPackages.${system}.extend rust-overlay.overlays.default;
-      mkCraneLib =
-        pkgs:
-        (crane.mkLib pkgs).overrideToolchain (
-          p:
-          # We use the rust-overlay to get the stable Rust toolchain for various targets.
-          # This is not exactly necessary, but it allows for compiling for various targets
-          # with the least amount of friction. Using a rust-toolchain.toml also allows us
-          # to provide a stable toolchain for non-NixOS users as well.
-          (p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
-        );
-    in
-    {
-      devShells = forAllSystems (
-        system:
-        let
-          pkgs = pkgsForEach system;
-        in
-        {
-          default = pkgs.callPackage ./packaging/nix/shell.nix { inherit self; };
-        }
-      );
-
-      packages = forAllSystems (
-        system:
-        let
-          pkgs = pkgsForEach system;
-          craneLib = mkCraneLib pkgs;
-        in
-        {
-          kopuz = pkgs.callPackage ./packaging/nix/crane.nix {
-            inherit craneLib;
-            gitRev = self.rev or self.dirtyRev or null;
-          };
-          default = self.packages.${system}.kopuz;
-        }
-      );
-
-      checks = forAllSystems (system: {
-        default = self.packages.${system}.default;
-      });
-
-      # Provides the default formatter for 'nix fmt'. For maximum compatibility, nixfmt
-      # has been selected here. The -tree variant is a wrapper script that formats all
-      # Nix files automatically.
-      formatter = forAllSystems (
-        system:
-        let
-          pkgs = pkgsForEach system;
-        in
-        pkgs.writeShellApplication {
-          name = "nix3-fmt-wrapper";
-
-          runtimeInputs = [
-            pkgs.nixfmt
-            pkgs.fd
-            pkgs.deno
-          ];
-
-          text = ''
-            # Format Nix files with nixfmt
-            fd "$@" -t f -e nix -x nixfmt -q '{}'
-
-            # Format Markdown files with Deno
-            fd "$@" -t f -e md -e js -x deno fmt '{}'
-          '';
-        }
-      );
-    };
 }

@@ -58,6 +58,10 @@ Only successful default-branch push/dispatch runs enter the separate publisher.
 It installs the pinned Attic client from the official cache with local builds
 disabled, imports selected NAR data without executing it, verifies the runtime
 closure, restores upstream signatures, then pushes roots and runtime closures.
+Selected output roots are pushed first with `--no-closure` and
+`--ignore-upstream-cache-filter`, so even roots already signed upstream get
+narinfo in `flakey`. A second normal closure push retains upstream filtering
+for dependencies. Either push failing fails publication.
 The token is stored in a temporary mode-0600 Attic configuration, removed from
 the client's environment, never passed in command arguments, and removed after
 success or failure. Failed publication fails the job.

@@ -51,8 +51,14 @@ def publish(outputs):
             config.write("endpoint = " + json.dumps(endpoint.rstrip("/") + "/") + "\n")
             config.write("token = " + json.dumps(token) + "\n")
         child_env["XDG_CONFIG_HOME"] = temporary
-        # Attic follows runtime closures by default. Only this manifest's roots
-        # are selected; the rest of the runner store is never enumerated.
+        # Selected roots must have narinfo in flakey even if they already
+        # carry an upstream signature. Limit this override to manifest roots.
+        subprocess.run([binary, "push", "--jobs", "1", "--no-closure",
+                        "--ignore-upstream-cache-filter", "--stdin", "ci:" + cache],
+                       input="\n".join(paths) + "\n", text=True, env=child_env, check=True)
+        # Keep normal upstream filtering for runtime dependencies. The rest of
+        # the runner store is never enumerated, and either upload failing fails
+        # publication rather than reporting an incompletely cached package.
         subprocess.run([binary, "push", "--jobs", "1", "--stdin", "ci:" + cache],
                        input="\n".join(paths) + "\n", text=True, env=child_env, check=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

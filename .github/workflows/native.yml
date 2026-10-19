@@ -106,6 +106,7 @@ jobs:
           python3 ci/test-transfer-attic.py
           python3 ci/test-public-closure.py
           python3 ci/test-configure-attic-read.py
+          python3 ci/test-native-target.py
       - name: Build native package and test Qobuz
         env:
           TARGET_SYSTEM: ${{ matrix.system }}
@@ -113,12 +114,14 @@ jobs:
         run: |
           set -euo pipefail
           test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$TARGET_SYSTEM"
-          target=".#packages.$TARGET_SYSTEM.$TARGET_PACKAGE"
+          target=$(python3 ci/native-target.py package)
+          check=$(python3 ci/native-target.py check)
           python3 ci/public-closure.py "$target"
           SECONDS=0
           nix build "$target" --no-update-lock-file --no-write-lock-file --no-link --print-out-paths -L > outputs.txt
-          python3 ci/public-closure.py ".#checks.$TARGET_SYSTEM.qobuz"
-          nix build ".#checks.$TARGET_SYSTEM.qobuz" --no-update-lock-file --no-write-lock-file --no-link -L
+          python3 ci/native-target.py verify --outputs outputs.txt
+          python3 ci/public-closure.py "$check"
+          nix build "$check" --no-update-lock-file --no-write-lock-file --no-link -L
           {
             echo "Built $TARGET_PACKAGE for $TARGET_SYSTEM"
             echo "Package build: ${SECONDS}s"

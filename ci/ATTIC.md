@@ -54,6 +54,11 @@ Native builders use the pinned Nix quick installer with Nix 2.34.7 on
 unused .NET, Android and GHC SDK space and allow up to six hours per package.
 The catalog builds one package per matrix job, rather than a complete host.
 
+Kopuz's native package and Qobuz check use an immutable `git+https` flake
+reference at `GITHUB_SHA`, with the same Git fetch policy as input consumers.
+The build manifest must match that selected output before closure export. The
+publisher imports and pushes that manifest without reevaluating the checkout.
+
 Only successful default-branch push/dispatch runs enter the separate publisher.
 It installs the pinned Attic client from the official cache with local builds
 disabled, imports selected NAR data without executing it, verifies the runtime

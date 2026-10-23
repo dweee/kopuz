@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import shutil
@@ -97,6 +100,28 @@ class Gates(unittest.TestCase):
         with patch.object(c, 'info', return_value={}), patch.object(c, 'run') as run:
             with self.assertRaises(ValueError): c.remote_closure([A], {})
             run.assert_not_called()
+
+
+class ReaderLifecycle(unittest.TestCase):
+    def test_cli_cleanup_needs_no_token_and_preserves_existing_nix_config(self):
+        helper = Path(__file__).with_name('configure-attic-read.py')
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)/'home'
+            temporary = Path(directory)/'job'
+            temporary.mkdir()
+            config = home/'.config/nix/nix.conf'
+            config.parent.mkdir(parents=True)
+            config.write_text('sandbox = false\n')
+            env = dict(os.environ, HOME=str(home), RUNNER_TEMP=str(temporary), ATTIC_TOKEN='fixture-token')
+            subprocess.run([sys.executable, str(helper)], env=env, capture_output=True, check=True)
+            credential = temporary/'flakey-attic.netrc'
+            self.assertTrue(credential.exists())
+            self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+            env.pop('ATTIC_TOKEN')
+            for _ in range(2):
+                subprocess.run([sys.executable, str(helper), '--cleanup'], env=env, capture_output=True, check=True)
+            self.assertFalse(credential.exists())
+            self.assertEqual(config.read_text().strip(), 'sandbox = false')
 
 
 @unittest.skipUnless(shutil.which('nix'), 'Nix required for signed cache fixture')

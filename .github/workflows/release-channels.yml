@@ -162,7 +162,7 @@ jobs:
       if: ${{ always() }}
       run: python3 ci/configure-attic-read.py --cleanup
   retain_aarch64_linux:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/flakey'
       }}
@@ -230,7 +230,7 @@ jobs:
       if: ${{ always() }}
       run: python3 ci/configure-attic-read.py --cleanup
   retain_aarch64_darwin:
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/flakey'
       }}

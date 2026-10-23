@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -19,6 +21,37 @@ ENTRY = {'narHash': 'sha256-'+'A'*43+'=', 'narSize': 12, 'references': []}
 
 
 class Gates(unittest.TestCase):
+    def test_metadata_mismatch_reports_fields_and_digests_without_paths(self):
+        path = '/nix/store/' + 'a'*32 + '-fixture-secret'
+        actual = dict(ENTRY, narSize=13)
+        output = io.StringIO()
+        with patch.object(c, 'info', return_value={path:actual}), contextlib.redirect_stdout(output):
+            with self.assertRaises(ValueError): c.verify([path], {path:ENTRY}, {})
+        report = json.loads(output.getvalue().split(': ', 1)[1])
+        self.assertEqual(report['fields'], ['narSize'])
+        self.assertTrue(report['root'])
+        self.assertEqual(report['origin'], 'attic')
+        self.assertEqual(report['expectedMetadataDigest'], c.digest(ENTRY))
+        self.assertNotEqual(report['expectedMetadataDigest'], report['actualMetadataDigest'])
+        self.assertNotIn('/nix/store', output.getvalue())
+        self.assertNotIn('fixture-secret', output.getvalue())
+
+    def test_command_failure_does_not_echo_secrets_or_store_paths(self):
+        diagnostic = 'HTTP error 403 at /nix/store/' + 'a'*32 + '-private with token fixture-secret'
+        result = subprocess.CompletedProcess(['nix'], 1, stdout='', stderr=diagnostic)
+        with patch.object(c.subprocess, 'run', return_value=result):
+            with self.assertRaises(c.CommandFailure) as raised: c.run('nix', 'eval')
+        self.assertEqual(str(raised.exception), 'authorization (exit 1)')
+        self.assertNotIn('fixture-secret', str(raised.exception))
+        self.assertNotIn('/nix/store', str(raised.exception))
+
+    def test_fixed_diagnostic_categories_cover_cache_and_source_failures(self):
+        self.assertEqual(c.failure_category('hash mismatch in fixed-output derivation'), 'source-hash-mismatch')
+        self.assertEqual(c.failure_category('NAR hash mismatch'), 'cache-integrity')
+        self.assertEqual(c.failure_category('path lacks a signature by a trusted key'), 'cache-signature')
+        self.assertEqual(c.failure_category('HTTP/2 framing error'), 'transport')
+        self.assertEqual(c.failure_category('attribute xyz missing'), 'evaluation')
+
     def test_truncated_nar_blocks_release(self):
         with patch.object(c, 'info', return_value={A: ENTRY}), patch.object(c, 'run', side_effect=RuntimeError('truncated')):
             with self.assertRaises(RuntimeError): c.verify([A], {A: ENTRY}, {})
@@ -182,6 +215,33 @@ class RetentionSelection(unittest.TestCase):
             git('branch','stable',revisions[0])
             records=c.release_refs({'forge':'github','remote':repo.as_uri()})
             self.assertEqual(set(records),set(revisions[-3:]+[revisions[0]]))
+
+
+@unittest.skipUnless(shutil.which('nix'), 'Nix required for whole-flake evaluation fixture')
+class WholeFlakeEvaluation(unittest.TestCase):
+    def test_cache_roots_and_checks_are_selected_from_the_complete_flake(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)/'source'
+            repo.mkdir()
+            def git(*args):
+                return subprocess.check_output(['git','-C',str(repo),*args],stderr=subprocess.PIPE,text=True).strip()
+            git('init','-q','-b','main')
+            git('config','user.name','Fixture')
+            git('config','user.email','fixture@example.invalid')
+            (repo/'flake.nix').write_text('''{ outputs = { self }: {
+              packages.x86_64-linux.default = { wrongDefault = true; };
+              packages.x86_64-linux.fixture = {
+                outputs = [ "out" ]; out.outPath = "'''+A+'''";
+              };
+              checks.x86_64-linux.smoke = 1;
+            }; }''')
+            git('add','flake.nix')
+            git('commit','-qm','Fixture whole flake')
+            flake = 'git+'+repo.as_uri()+'?rev='+git('rev-parse','HEAD')
+            rules = {'targets':{'x86_64-linux':[{'attribute':'packages.x86_64-linux.fixture'}]}}
+            self.assertEqual(c.evaluated_roots(rules,'x86_64-linux',flake=flake),[A])
+            self.assertEqual(c.native_check_names(flake,'x86_64-linux',dict(os.environ)),['smoke'])
+            self.assertEqual(c.native_check_names(flake,'aarch64-linux',dict(os.environ)),[])
 
 
 if __name__ == '__main__': unittest.main()

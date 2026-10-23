@@ -27,11 +27,47 @@ FLAGS = ['--option', 'accept-flake-config', 'false', '--no-update-lock-file', '-
 NO_BUILD = ['--option', 'max-jobs', '0', '--option', 'builders', '', '--option', 'fallback', 'false']
 
 
+ACTIVE_PHASE = 'startup'
+
+
+def phase(label):
+    global ACTIVE_PHASE
+    if not re.fullmatch(r'[a-z-]+', label):
+        raise ValueError('Invalid release phase')
+    ACTIVE_PHASE = label
+    print('Release phase: ' + label, flush=True)
+
+
+class CommandFailure(RuntimeError):
+    """A fixed diagnostic category, never raw subprocess output or arguments."""
+
+
+def failure_category(diagnostic):
+    patterns = [
+        ('source-hash-mismatch', r'hash mismatch in fixed-output derivation'),
+        ('cache-integrity', r'nar.*hash mismatch|corrupted path|invalid nar'),
+        ('cache-metadata-mismatch', r'published metadata differs|publication changed'),
+        ('cache-missing-output', r'incomplete cache publication|required cache output is missing'),
+        ('cache-signature', r'lacks a signature|is not signed|invalid signature|no trusted signature'),
+        ('authorization', r'HTTP[^\n]*(?:401|403)|unauthorized|forbidden|authentication failed'),
+        ('transport', r'unexpected eof|http/2|framing|connection reset|timed out|timeout|internalservererror|HTTP[^\n]*50[0-9]'),
+        ('missing-input-or-output', r'HTTP[^\n]*404|does not exist|no such file'),
+        ('evaluation', r'evaluation aborted|attribute[^\n]*missing|syntax error|infinite recursion|assertion'),
+        ('build', r'builder for[^\n]*failed|ninja[^\n]*stopped|failed with exit code'),
+    ]
+    return next((name for name, pattern in patterns if re.search(pattern, diagnostic, re.I)), 'command-failed')
+
+
 def run(*args, env=None):
-    result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
+    try:
+        result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
+    except subprocess.TimeoutExpired:
+        raise CommandFailure('command deadline exceeded') from None
     if result.returncode:
-        # Build/server output can include non-redistributable paths. Keep it local.
-        raise RuntimeError(args[0] + ' ' + args[1] + ' failed')
+        # Nix diagnostics may contain private paths or authenticated URLs. Emit
+        # only a fixed classification and the numeric status, never their text.
+        kind = failure_category((result.stderr or '') + '\n' + (result.stdout or ''))
+        raise CommandFailure(kind + ' (exit ' + str(result.returncode) + ')')
     return result.stdout.strip()
 
 
@@ -126,6 +162,17 @@ def metadata(entry):
             for k in ['narHash', 'narSize', 'references']}
 
 
+def report_metadata_difference(path, roots, origin, expected, actual, recheck=False):
+    # Only fixed field labels and one-way digests leave the verifier. Paths,
+    # reference lists, credentials and raw remote metadata remain suppressed.
+    detail = {'root': path in roots, 'origin': 'attic' if origin == CACHE else 'upstream',
+              'read': 'fresh' if recheck else 'initial',
+              'fields': [k for k in ['narHash', 'narSize', 'references'] if expected[k] != actual[k]],
+              'pathDigest': hashlib.sha256(path.encode()).hexdigest(),
+              'expectedMetadataDigest': digest(expected), 'actualMetadataDigest': digest(actual)}
+    print('Cache metadata mismatch: ' + json.dumps(detail, sort_keys=True), flush=True)
+
+
 def remote_env(env, directory):
     # Isolated metadata DB; no success from the builder's local store/cache DB.
     return dict(env, XDG_CACHE_HOME=str(directory), NIX_CACHE_HOME=str(directory),
@@ -158,7 +205,9 @@ def verify(roots, expected, env):
                     continue
                 if remote.get(path) is None:
                     continue
-                if metadata(remote[path]) != entry:
+                actual = metadata(remote[path])
+                if actual != entry:
+                    report_metadata_difference(path, roots, origin, entry, actual)
                     raise ValueError('Published metadata differs from build')
                 # Reads NAR bytes, verifies hash and signature; no --no-contents,
                 # local-store fallback, source build or metadata-only success.
@@ -170,7 +219,9 @@ def verify(roots, expected, env):
     with tempfile.TemporaryDirectory(prefix='channel-recheck-') as directory:
         reader = remote_env(env, directory)
         for path, origin in origins.items():
-            if metadata(info([path], reader, origin).get(path)) != expected[path]:
+            actual = metadata(info([path], reader, origin).get(path))
+            if actual != expected[path]:
+                report_metadata_difference(path, roots, origin, expected[path], actual, recheck=True)
                 raise ValueError('Publication changed during verification')
     return digest({'roots': sorted(roots), 'metadata': expected})
 
@@ -210,11 +261,17 @@ def evaluated_roots(rules, system, flake=None, expression=None, env=None):
     if expression:
         args = ['--impure', '--expr', '('+apply+') ('+expression+')']
     else:
-        args = [flake+'#', '--apply', apply]
+        args = ['--expr', '('+apply+') (builtins.getFlake '+json.dumps(flake)+')']
     roots = json.loads(run('nix', 'eval', '--json', *args, *FLAGS, *NO_BUILD, env=env))
     if not roots or any(not STORE.fullmatch(p) for p in roots):
         raise ValueError('Missing evaluated release outputs')
     return sorted(set(roots))
+
+
+def native_check_names(flake, system, env):
+    # An empty flake fragment selects its default package, not its outputs.
+    expression = 'builtins.attrNames ((builtins.getFlake '+json.dumps(flake)+').checks.'+system+' or {})'
+    return json.loads(run('nix', 'eval', '--json', '--expr', expression, *FLAGS, env=env))
 
 
 def audit(rules, sha, system, record, env, flake=None, expression=None):
@@ -302,6 +359,7 @@ def build(system):
     # Writer/forge tokens never enter Nix evaluation or package build processes.
     env = {k: v for k, v in os.environ.items()
            if k not in {'ATTIC_TOKEN', 'CHANNEL_TOKEN', 'SOURCE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'}}
+    phase('check-native-platform')
     if run('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem', env=env) != system:
         raise ValueError('Native builder required')
     targets = rules['targets'][system]
@@ -310,6 +368,7 @@ def build(system):
     flake = 'git+file://' + str(ROOT) + '?rev=' + sha
     if rules.get('submodules'):
         flake += '&submodules=1'
+    phase('evaluate-system-inventory')
     systems = json.loads(run('nix', 'eval', '--json', flake + '#packages', '--apply',
                              'builtins.attrNames', *FLAGS, env=env))
     if set(systems) - set(rules.get('excludedSystems', [])) != set(rules['targets']):
@@ -318,6 +377,7 @@ def build(system):
     with tempfile.TemporaryDirectory(prefix='channel-outputs-') as directory:
         for target in targets:
             attr = flake + '#' + target['attribute']
+            phase('inspect-output-policy')
             if target['visibility'] == 'public':
                 with build_environment(env):
                     module('public-closure.py').derivation(attr)
@@ -326,6 +386,7 @@ def build(system):
                 guard = module('build-cache-only.py')
                 graph = json.loads(run('nix', 'derivation', 'show', '--recursive', attr, *FLAGS, env=env))
                 guard.check(graph)
+            phase('build-required-output')
             paths = run('nix', 'build', attr + '^*', *FLAGS, '--fallback', '--no-link',
                         '--print-out-paths', env=env).splitlines()
             if not paths or any(not STORE.fullmatch(p) or p.endswith('.drv') for p in paths):
@@ -333,14 +394,16 @@ def build(system):
             roots.extend(paths)
         # All native flake checks are required, even when the package job would
         # otherwise reuse a cached output. Missing checks are an empty set.
-        expression = 'f: builtins.attrNames (f.checks.' + system + ' or {})'
-        checks = json.loads(run('nix', 'eval', '--json', flake + '#', '--apply', expression, *FLAGS, env=env))
+        phase('build-native-checks')
+        checks = native_check_names(flake, system, env)
         for name in checks:
             if not re.fullmatch(r'[\w+-]+', name):
                 raise ValueError('Invalid check name')
             run('nix', 'build', flake + '#checks.' + system + '.' + name, *FLAGS, '--no-link', env=env)
         roots = sorted(set(roots))
+        phase('inspect-built-closure')
         expected = info(roots, env)
+        phase('enforce-publication-policy')
         if rules['forge'] == 'github':
             public = [t for t in targets if t['visibility'] == 'public']
             # Runtime guards are also applied by the public builder. A combined
@@ -353,14 +416,18 @@ def build(system):
                 module('build-cache-only.py').check(list(expected))
         outputs = Path(directory) / 'outputs.txt'
         outputs.write_text('\n'.join(roots) + '\n')
+        phase('prepare-cache-publisher')
         client = run('nix', 'build', '--inputs-from', flake, 'nixpkgs#attic-client', *FLAGS,
                      '--no-link', '--print-out-paths', env=env)
         if not STORE.fullmatch(client):
             raise ValueError('Invalid publisher')
         publish_env = dict(os.environ, ATTIC_BIN=client + '/bin/attic',
                            ATTIC_ENDPOINT='https://attic.monke.fail', ATTIC_CACHE='flakey')
+        phase('upload-selected-closure')
         run(sys.executable, str(ROOT / 'ci/push-attic.py'), '--outputs', str(outputs), env=publish_env)
+        phase('verify-remote-cache')
         proof = verify(roots, expected, env)
+        phase('record-release-proof')
         if source() != sha:
             raise ValueError('Source changed during release')
         receipt = digest({'commit': sha, 'policy': digest(rules), 'system': system, 'closure': proof})
@@ -439,8 +506,13 @@ def main():
             retain(args.system)
         else:
             print(json.dumps(policy(), sort_keys=True))
-    except (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError):
-        print('Release channel gate failed; the previous channel is retained.', file=sys.stderr)
+    except CommandFailure as error:
+        print('Release channel gate failed during ' + ACTIVE_PHASE + ': ' + str(error) + '; the previous channel is retained.', file=sys.stderr)
+        return 1
+    except (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+        kind = failure_category(str(error))
+        if kind == 'command-failed': kind = 'validation-failed'
+        print('Release channel gate failed during ' + ACTIVE_PHASE + ': ' + kind + '; the previous channel is retained.', file=sys.stderr)
         return 1
     return 0
 

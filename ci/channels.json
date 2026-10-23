@@ -1,0 +1,30 @@
+{
+  "targets": {
+    "x86_64-linux": [
+      {
+        "attribute": "packages.x86_64-linux.default",
+        "visibility": "public"
+      }
+    ],
+    "aarch64-linux": [
+      {
+        "attribute": "packages.aarch64-linux.default",
+        "visibility": "public"
+      }
+    ],
+    "aarch64-darwin": [
+      {
+        "attribute": "packages.aarch64-darwin.default",
+        "visibility": "public"
+      }
+    ]
+  },
+  "excludedSystems": [],
+  "submodules": false,
+  "integrationInventory": false,
+  "version": 1,
+  "forge": "github",
+  "repository": "dweee/kopuz",
+  "branch": "flakey",
+  "remote": "https://github.com/dweee/kopuz.git"
+}

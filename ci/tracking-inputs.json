@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "inputs": {
+    "nixpkgs": {
+      "source": "github:NixOS/nixpkgs"
+    }
+  }
+}

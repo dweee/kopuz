@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "checks": [],
+  "upstreams": [
+    {
+      "name": "Kopuz-org/kopuz",
+      "api": "https://api.github.com/repos/Kopuz-org/kopuz/releases/latest"
+    }
+  ]
+}

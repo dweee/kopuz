@@ -5,6 +5,7 @@ The tracking inventory is separate from exact flake.nix/flake.lock pins. Lock
 files are written exclusively by Nix. No merge, promotion or deployment.
 """
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -12,12 +13,28 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('channel_diagnostics', ROOT / 'ci/release-channel.py')
+channel = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(channel)
+ACTIVE_PHASE = 'startup'
+
+
+def phase(label):
+    global ACTIVE_PHASE
+    if not re.fullmatch(r'[a-z-]+', label):
+        raise ValueError('Invalid updater phase')
+    ACTIVE_PHASE = label
+    print('Input update phase: ' + label, flush=True)
 
 
 def run(*args):
-    result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, timeout=3600)
+    try:
+        result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, timeout=3600)
+    except subprocess.TimeoutExpired:
+        raise channel.CommandFailure('command deadline exceeded') from None
     if result.returncode:
-        raise RuntimeError('Input resolution or validation failed: ' + args[0])
+        kind = channel.failure_category((result.stderr or '') + '\n' + (result.stdout or ''))
+        raise channel.CommandFailure(kind + ' (exit ' + str(result.returncode) + ')')
     return result.stdout.strip()
 
 
@@ -48,12 +65,29 @@ def root_node(lock, name):
     return lock['nodes'][key]
 
 
+def instantiation_expression(system):
+    # `flake check --no-build` evaluates read-only, so an import-from-derivation
+    # source absent from a fresh runner store is "not valid". Instantiating this
+    # system's packages and checks first realises only those IFD inputs. An empty
+    # flake fragment would select the default package, so load the whole flake.
+    if not re.fullmatch(r'[a-z0-9_]+-[a-z0-9_]+', system):
+        raise ValueError('Unexpected builder system')
+    # The same Git view `nix flake check .` evaluates, including any declared
+    # self.submodules setting.
+    return ('let f = builtins.getFlake ' + json.dumps('git+file://' + str(ROOT)) + '; '
+            'drvs = output: builtins.mapAttrs (_: p: p.drvPath) ((f.${output} or {}).' + system + ' or {}); '
+            'in { packages = drvs "packages"; checks = drvs "checks"; }')
+
+
 def update():
+    phase('inspect-tracking-inventory')
     config = json.loads((ROOT / 'ci/tracking-inputs.json').read_text())
     if config['version'] != 1:
         raise ValueError('Unknown tracking inventory')
+    phase('check-clean-checkout')
     if run('git', 'status', '--porcelain', '--untracked-files=no'):
         raise ValueError('Input updates require a clean checkout')
+    phase('inspect-locked-inputs')
     lockfile = ROOT / 'flake.lock'
     before = json.loads(lockfile.read_text())
     declared = before['nodes'][before['root']]['inputs']
@@ -66,6 +100,7 @@ def update():
     # Follow that exact nixpkgs/darwin tuple instead of retargeting its recipes.
     alignment = config.get('alignWith')
     if alignment:
+        phase('align-catalog-inputs')
         catalog = json.loads(run('nix', 'flake', 'metadata', '--json', '--refresh',
                                  '--option', 'accept-flake-config', 'false',
                                  '--no-write-lock-file', overrides[alignment['input']]))
@@ -77,9 +112,11 @@ def update():
     args = ['nix', 'flake', 'lock', '--refresh', '--option', 'accept-flake-config', 'false']
     for name, source in sorted(overrides.items()):
         args += ['--override-input', name, source]
+    phase('lock-moving-inputs')
     run(*args)
     after = json.loads(lockfile.read_text())
     flake = ROOT / 'flake.nix'
+    phase('pin-exact-declarations')
     text = flake.read_text()
     for name in sorted(overrides):
         locked = root_node(after, name)['locked']
@@ -90,16 +127,23 @@ def update():
     flake.write_text(text)
     # Synchronize original metadata with the exact declarations using Nix, not a
     # JSON patch. Follows edges and all transitive locks remain Nix-owned.
+    phase('synchronize-lock-metadata')
     run('nix', 'flake', 'lock', '--option', 'accept-flake-config', 'false')
     ownership = ROOT / 'nix/forks.json'
     if ownership.exists():
+        phase('align-fork-inventory')
         records = json.loads(ownership.read_text())
         for name, record in records.items():
             if name in overrides:
                 record['revision'] = root_node(after, name)['locked']['rev']
         ownership.write_text(json.dumps(records, indent=2)+'\n')
     if alignment:
+        phase('validate-catalog-alignment')
         run(sys.executable, 'scripts/check-dave-packages-pin.py')
+    phase('instantiate-import-from-derivation')
+    run('nix', 'eval', '--impure', '--json', '--option', 'accept-flake-config', 'false',
+        '--expr', instantiation_expression(run('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem')))
+    phase('validate-candidate')
     run('nix', 'flake', 'check', '--no-build', '--option', 'accept-flake-config', 'false',
         '--no-write-lock-file', '--no-update-lock-file')
     changed = [name for name in overrides
@@ -108,9 +152,21 @@ def update():
     return changed
 
 
-if __name__ == '__main__':
+def main():
     try:
         update()
-    except (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError):
-        print('Input update failed; no update branch should be published.', file=sys.stderr)
-        sys.exit(1)
+    except Exception as error:
+        if isinstance(error, channel.CommandFailure):
+            detail = str(error)
+        else:
+            detail = channel.failure_category(str(error))
+            if detail == 'command-failed':
+                detail = 'validation-failed'
+        print('Input update failed during ' + ACTIVE_PHASE + ': ' + detail +
+              '; no update branch should be published.', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

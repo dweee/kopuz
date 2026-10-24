@@ -23,12 +23,13 @@ ENTRY = {'narHash': 'sha256-'+'A'*43+'=', 'narSize': 12, 'references': []}
 class Gates(unittest.TestCase):
     def test_metadata_mismatch_reports_fields_and_digests_without_paths(self):
         path = '/nix/store/' + 'a'*32 + '-fixture-secret'
-        actual = dict(ENTRY, narSize=13)
+        actual = dict(ENTRY, narSize=13, references=[B])
         output = io.StringIO()
         with patch.object(c, 'info', return_value={path:actual}), contextlib.redirect_stdout(output):
             with self.assertRaises(ValueError): c.verify([path], {path:ENTRY}, {})
         report = json.loads(output.getvalue().split(': ', 1)[1])
-        self.assertEqual(report['fields'], ['narSize'])
+        self.assertEqual(report['fields'], ['narSize', 'references'])
+        self.assertEqual(report['action'], 'rejected')
         self.assertTrue(report['root'])
         self.assertEqual(report['origin'], 'attic')
         self.assertEqual(report['expectedMetadataDigest'], c.digest(ENTRY))
@@ -56,10 +57,42 @@ class Gates(unittest.TestCase):
         with patch.object(c, 'info', return_value={A: ENTRY}), patch.object(c, 'run', side_effect=RuntimeError('truncated')):
             with self.assertRaises(RuntimeError): c.verify([A], {A: ENTRY}, {})
 
-    def test_metadata_mismatch_blocks_before_download(self):
-        with patch.object(c, 'info', return_value={A: dict(ENTRY, narSize=99)}), patch.object(c, 'run') as run:
+    def test_reference_mismatch_blocks_before_download(self):
+        with patch.object(c, 'info', return_value={A: dict(ENTRY, references=[A])}), patch.object(c, 'run') as run:
             with self.assertRaises(ValueError): c.verify([A], {A: ENTRY}, {})
             run.assert_not_called()
+
+    def test_nonreproducible_rebuild_adopts_signed_cached_realisation(self):
+        cached = dict(ENTRY, narHash='sha256-'+'B'*43+'=', narSize=13)
+        output = io.StringIO()
+        with patch.object(c, 'info', return_value={A: cached}), patch.object(c, 'run', return_value='') as run, contextlib.redirect_stdout(output):
+            proof = c.verify([A], {A: ENTRY}, {})
+        # The proof covers the cached metadata that a later audit reads remotely.
+        self.assertEqual(proof, c.digest({'roots': [A], 'metadata': {A: cached}}))
+        # The adopted NAR is still read and signature-checked, never skipped.
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn('--no-contents', run.call_args.args)
+        report = json.loads(output.getvalue().splitlines()[0].split(': ', 1)[1])
+        self.assertEqual(report['action'], 'adopted')
+        self.assertEqual(report['fields'], ['narHash', 'narSize'])
+        self.assertEqual(report['expectedMetadataDigest'], c.digest(ENTRY))
+        self.assertEqual(report['actualMetadataDigest'], c.digest(cached))
+        self.assertIn('Adopted 1 existing signed cache realisation', output.getvalue())
+        self.assertNotIn('/nix/store', output.getvalue())
+
+    def test_upstream_mismatch_is_never_adopted(self):
+        root = dict(ENTRY, references=[B])
+        def info(paths, env, origin):
+            if paths == [B]:
+                return {} if origin == c.CACHE else {B: dict(ENTRY, narSize=99)}
+            return {A: root}
+        with patch.object(c, 'info', side_effect=info), patch.object(c, 'run', return_value=''):
+            with self.assertRaises(ValueError): c.verify([A], {A: root, B: ENTRY}, {})
+
+    def test_adopted_realisation_changed_during_read_blocks(self):
+        cached = dict(ENTRY, narHash='sha256-'+'B'*43+'=')
+        with patch.object(c, 'info', side_effect=[{A: cached}, {A: ENTRY}]), patch.object(c, 'run', return_value=''):
+            with self.assertRaises(ValueError): c.verify([A], {A: ENTRY}, {})
 
     def test_metadata_retracted_after_read_blocks(self):
         with patch.object(c, 'info', side_effect=[{A: ENTRY}, {}]), patch.object(c, 'run'):

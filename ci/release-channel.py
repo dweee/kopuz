@@ -162,11 +162,11 @@ def metadata(entry):
             for k in ['narHash', 'narSize', 'references']}
 
 
-def report_metadata_difference(path, roots, origin, expected, actual, recheck=False):
+def report_metadata_difference(path, roots, origin, expected, actual, recheck=False, action='rejected'):
     # Only fixed field labels and one-way digests leave the verifier. Paths,
     # reference lists, credentials and raw remote metadata remain suppressed.
     detail = {'root': path in roots, 'origin': 'attic' if origin == CACHE else 'upstream',
-              'read': 'fresh' if recheck else 'initial',
+              'read': 'fresh' if recheck else 'initial', 'action': action,
               'fields': [k for k in ['narHash', 'narSize', 'references'] if expected[k] != actual[k]],
               'pathDigest': hashlib.sha256(path.encode()).hexdigest(),
               'expectedMetadataDigest': digest(expected), 'actualMetadataDigest': digest(actual)}
@@ -193,9 +193,10 @@ def verify(roots, expected, env):
     # Roots must come from our publisher. Dependencies can use the reviewed
     # upstream cache when Attic's upstream-signature filter omits them.
     origins = {}
+    adopted = []
     with tempfile.TemporaryDirectory(prefix='channel-read-') as directory:
         reader = remote_env(env, directory)
-        for path, entry in expected.items():
+        for path, entry in list(expected.items()):
             for origin in ([CACHE] if path in roots else [CACHE, UPSTREAM]):
                 try:
                     remote = info([path], reader, origin)
@@ -207,8 +208,19 @@ def verify(roots, expected, env):
                     continue
                 actual = metadata(remote[path])
                 if actual != entry:
-                    report_metadata_difference(path, roots, origin, entry, actual)
-                    raise ValueError('Published metadata differs from build')
+                    # Another publisher already holds a different build of this
+                    # input-addressed path, and Attic keeps that first copy. A
+                    # non-reproducible rebuild cannot replace it. Adopt the
+                    # signed cached copy only when its references match, then
+                    # read and verify its bytes like any other member. Both
+                    # metadata digests are logged.
+                    adopt = origin == CACHE and actual['references'] == entry['references']
+                    report_metadata_difference(path, roots, origin, entry, actual,
+                                               action='adopted' if adopt else 'rejected')
+                    if not adopt:
+                        raise ValueError('Published metadata differs from build')
+                    expected[path] = actual
+                    adopted.append(path)
                 # Reads NAR bytes, verifies hash and signature; no --no-contents,
                 # local-store fallback, source build or metadata-only success.
                 run('nix', 'store', 'verify', '--store', origin, '--sigs-needed', '1', path, env=reader)
@@ -223,6 +235,14 @@ def verify(roots, expected, env):
             if actual != expected[path]:
                 report_metadata_difference(path, roots, origin, expected[path], actual, recheck=True)
                 raise ValueError('Publication changed during verification')
+    if adopted:
+        # The proof covers the cached metadata, so later audits of the cache match it.
+        message = (f'Adopted {len(adopted)} existing signed cache realisation(s) whose bytes differ '
+                   'from this non-reproducible build; their cached NARs were read and verified.')
+        print(message, flush=True)
+        if os.environ.get('GITHUB_STEP_SUMMARY'):
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                summary.write(message + '\n')
     return digest({'roots': sorted(roots), 'metadata': expected})
 
 

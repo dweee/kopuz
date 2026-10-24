@@ -22,7 +22,7 @@ name: Verified release channels
 permissions:
   contents: read
 concurrency:
-  group: verified-release-channels
+  group: ${{ github.event_name == 'pull_request' && format('verified-release-pr-{0}', github.ref) || 'verified-release-channels' }}
   cancel-in-progress: false
 jobs:
   test:

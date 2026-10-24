@@ -9,30 +9,51 @@ import re
 import subprocess
 import sys
 from urllib.error import HTTPError
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def fetch(url):
+def api_host(url, required=None):
     parsed = urlsplit(url)
-    if parsed.scheme != 'https' or parsed.hostname not in {'api.github.com', 'git.monke.fail'} or parsed.username:
+    if (parsed.scheme != 'https' or parsed.hostname not in {'api.github.com', 'git.monke.fail'}
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port not in {None, 443} or parsed.fragment
+            or (required is not None and parsed.hostname != required)):
         raise ValueError('Unreviewed monitoring endpoint')
+    return parsed.hostname
+
+
+def fetch(url):
+    host = api_host(url)
     headers = {'User-Agent': 'release-update-monitor', 'Accept': 'application/json'}
     # Tokens are only sent to their own forge API; never source/artifact URLs.
-    token = os.environ.get('GH_TOKEN', '') if parsed.hostname == 'api.github.com' else os.environ.get('MONITOR_TOKEN', '')
+    token = os.environ.get('GH_TOKEN', '') if host == 'api.github.com' else os.environ.get('MONITOR_TOKEN', '')
     if token:
-        headers['Authorization'] = ('Bearer ' if parsed.hostname == 'api.github.com' else 'token ') + token
+        headers['Authorization'] = ('Bearer ' if host == 'api.github.com' else 'token ') + token
     class NoRedirect(__import__('urllib.request', fromlist=['HTTPRedirectHandler']).HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
-            raise ValueError('Monitoring API redirect refused')
+            return None
     opener = __import__('urllib.request', fromlist=['build_opener']).build_opener(NoRedirect())
-    with opener.open(Request(url, headers=headers), timeout=45) as response:
-        data = response.read(8*1024*1024+1)
-        if len(data) > 8*1024*1024:
-            raise ValueError('Oversize release metadata')
-        return json.loads(data)
+    # GitHub redirects renamed repositories to their stable repository-ID URL.
+    # Validate every hop before constructing the next authenticated request.
+    for hops in range(4):
+        try:
+            with opener.open(Request(url, headers=headers), timeout=45) as response:
+                data = response.read(8*1024*1024+1)
+                if len(data) > 8*1024*1024:
+                    raise ValueError('Oversize release metadata')
+                return json.loads(data)
+        except HTTPError as error:
+            if error.code not in {301, 302, 303, 307, 308}:
+                raise
+            location = error.headers.get('Location')
+            if not location or hops == 3:
+                raise ValueError('Monitoring API redirect limit or missing target') from None
+            target = urljoin(url, location)
+            api_host(target, host)
+            url = target
 
 
 def discover(text):

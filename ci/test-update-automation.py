@@ -71,6 +71,15 @@ class Updates(unittest.TestCase):
         match = u.url_match(text, 'tool')
         self.assertEqual(text[match.start(1):match.end(1)], 'old')
 
+    def test_input_names_are_not_suffixes_of_other_nix_identifiers(self):
+        for prefix in ['pumpkin-', 'other_', "other'", 'other']:
+            for declaration in ['nixpkgs.url = "other";', 'nixpkgs = { url = "other"; };']:
+                with self.subTest(prefix=prefix, declaration=declaration):
+                    text = 'inputs = { nixpkgs.url = "selected"; ' + prefix + declaration + ' };'
+                    self.assertEqual(u.url_match(text, 'nixpkgs').group(1), 'selected')
+                    with self.assertRaises(ValueError):
+                        u.url_match(prefix + declaration, 'nixpkgs')
+
     def test_duplicate_declaration_rejected(self):
         with self.assertRaises(ValueError): u.url_match('tool.url = "a"; tool.url = "b";', 'tool')
 
@@ -200,9 +209,9 @@ class RealInputMovement(unittest.TestCase):
             run(dependency, 'git', 'commit', '-m', 'Fixture old source')
             old = run(dependency, 'git', 'rev-parse', 'HEAD')
             source = 'git+' + dependency.as_uri()
-            (consumer/'flake.nix').write_text('{ inputs.dep = { url = "'+source+'?rev='+old+'"; flake = false; }; outputs = {self, dep}: {}; }')
+            (consumer/'flake.nix').write_text('{ inputs.dep = { url = "'+source+'?rev='+old+'"; flake = false; }; inputs.other-dep = { url = "'+source+'?rev='+old+'"; flake = false; }; outputs = {self, dep, other-dep}: {}; }')
             (consumer/'ci').mkdir()
-            (consumer/'ci/tracking-inputs.json').write_text(json.dumps({'version':1,'inputs':{'dep':{'source':source+'?ref=main'}}}))
+            (consumer/'ci/tracking-inputs.json').write_text(json.dumps({'version':1,'inputs':{'dep':{'source':source+'?ref=main'}, 'other-dep':{'source':source+'?rev='+old}}}))
             run(consumer, 'git', 'add', 'flake.nix', 'ci/tracking-inputs.json')
             run(consumer, 'nix', 'flake', 'lock')
             run(consumer, 'git', 'add', 'flake.lock')
@@ -212,7 +221,10 @@ class RealInputMovement(unittest.TestCase):
             new = run(dependency, 'git', 'rev-parse', 'HEAD')
             with patch.object(u, 'ROOT', consumer):
                 self.assertEqual(u.update(), ['dep'])
-            self.assertIn('rev='+new, (consumer/'flake.nix').read_text())
+            updated = (consumer/'flake.nix').read_text()
+            self.assertIn('rev='+new, u.url_match(updated, 'dep').group(1))
+            self.assertIn('rev='+old, u.url_match(updated, 'other-dep').group(1))
+            self.assertEqual(u.root_node(json.loads((consumer/'flake.lock').read_text()), 'other-dep')['locked']['rev'], old)
             locked = u.root_node(json.loads((consumer/'flake.lock').read_text()), 'dep')
             self.assertEqual(locked['locked']['rev'], new)
             self.assertEqual(locked['original']['rev'], new)

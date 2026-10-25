@@ -50,8 +50,9 @@ def pin_url(locked):
 
 
 def url_match(text, name):
-    # Only the declared input's first URL, never an arbitrary matching revision.
-    pattern = r'\b' + re.escape(name) + r'(?:\.url\s*=|\s*=\s*\{[^{}]*?\burl\s*=)\s*"([^"\n]+)"'
+    # Nix identifiers include hyphens and apostrophes; a regex word boundary
+    # would also match nixpkgs inside pumpkin-nixpkgs.
+    pattern = r"(?<![A-Za-z0-9_'-])" + re.escape(name) + r'(?:\.url\s*=|\s*=\s*\{[^{}]*?\burl\s*=)\s*"([^"\n]+)"'
     matches = list(re.finditer(pattern, text))
     if len(matches) != 1:
         raise ValueError('Expected exactly one input URL: ' + name)

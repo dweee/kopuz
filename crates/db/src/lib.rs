@@ -9,6 +9,8 @@
 //! types), so those crates stay pure model definitions and all save/load lives
 //! here.
 
+#![allow(clippy::double_must_use)]
+
 use std::sync::Arc;
 
 mod backend;

@@ -21,7 +21,9 @@
   upstream = pkgs.callPackage (upstreamSource + /packaging/nix/crane.nix) {
     inherit craneLib;
   };
+  cargoVendorDir = craneLib.vendorCargoDeps {src = source;};
   qobuzTests = upstream.overrideAttrs (_: {
+    inherit cargoVendorDir;
     pname = "kopuz-qobuz-tests";
     src = source;
     cargoArtifacts = compiled;
@@ -41,6 +43,7 @@
     dontFixup = true;
   });
   compiled = upstream.overrideAttrs (old: {
+    inherit cargoVendorDir;
     version = "0.21.0-qobuz";
     src = source;
     __intentionallyOverridingVersion = true;

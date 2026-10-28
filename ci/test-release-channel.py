@@ -46,6 +46,17 @@ class Gates(unittest.TestCase):
         self.assertNotIn('fixture-secret', str(raised.exception))
         self.assertNotIn('/nix/store', str(raised.exception))
 
+    def test_command_failure_detail_is_redacted(self):
+        diagnostic = ('building\nerror: unable to download \'https://user:fixture-secret@host/x\': '
+                      'HTTP error 503 for /nix/store/' + 'a'*32 + '-private ghp_abc123')
+        result = subprocess.CompletedProcess(['nix'], 1, stdout='', stderr=diagnostic)
+        with patch.object(c.subprocess, 'run', return_value=result):
+            with self.assertRaises(c.CommandFailure) as raised: c.run('nix', 'build')
+        text = str(raised.exception)
+        self.assertTrue(text.startswith('transport (exit 1): error: unable to download'))
+        for leak in ['fixture-secret', '/nix/store', 'ghp_abc123', 'private']:
+            self.assertNotIn(leak, text)
+
     def test_fixed_diagnostic_categories_cover_cache_and_source_failures(self):
         self.assertEqual(c.failure_category('hash mismatch in fixed-output derivation'), 'source-hash-mismatch')
         self.assertEqual(c.failure_category('NAR hash mismatch'), 'cache-integrity')
@@ -148,8 +159,19 @@ class Gates(unittest.TestCase):
         rules = {'targets': {'aarch64-linux': []}}
         record = {'commit':'a'*40, 'policy':c.digest(rules), 'activationAuthorized':False,
                   'proofs':{'aarch64-linux':'b'*64}}
-        with patch.object(c, 'evaluated_roots', return_value=[A]), patch.object(c, 'remote_closure', return_value={A:ENTRY}), patch.object(c, 'verify', return_value='c'*64):
+        output = io.StringIO()
+        with patch.object(c, 'evaluated_roots', return_value=[A]), patch.object(c, 'remote_closure', return_value={A:ENTRY}), patch.object(c, 'verify', return_value='c'*64), contextlib.redirect_stdout(output):
             with self.assertRaises(ValueError): c.audit(rules,'a'*40,'aarch64-linux',record,{})
+        line = next(line for line in output.getvalue().splitlines() if line.startswith('Retained proof mismatch: '))
+        report = json.loads(line.split(': ', 1)[1])
+        self.assertEqual(report['commit'], 'a'*40)
+        self.assertEqual(report['system'], 'aarch64-linux')
+        self.assertEqual(report['expectedProof'], 'b'*64)
+        self.assertNotEqual(report['expectedProof'], report['actualProof'])
+        self.assertEqual(report['rootCount'], 1)
+        self.assertEqual(report['closurePathCount'], 1)
+        self.assertEqual(report['rootsDigest'], c.digest([A]))
+        self.assertNotIn('/nix/store', output.getvalue())
 
     def test_cache_audit_evaluation_disables_builders(self):
         rules = {'targets': {'aarch64-linux':[{'attribute':'packages.aarch64-linux.example'}]}}
@@ -190,6 +212,171 @@ class ReaderLifecycle(unittest.TestCase):
             self.assertEqual(config.read_text().strip(), 'sandbox = false')
 
 
+PUBLIC = 'https://attic.monke.fail'
+INTERNAL = 'http://172.29.0.1:8080'
+TAILNET = 'http://icicle.eel-ling.ts.net:8080'
+HELPER = Path(__file__).with_name('configure-attic-read.py')
+configure_spec = importlib.util.spec_from_file_location('configure_attic_read', HELPER)
+reader = importlib.util.module_from_spec(configure_spec)
+configure_spec.loader.exec_module(reader)
+REJECTED = ['http://attic.monke.fail', 'https://attic.example', 'http://172.29.0.1', 'http://172.29.0.1:8081',
+            'https://172.29.0.1:8080', 'http://127.0.0.1:8080', 'http://172.29.0.1:8080/other',
+            'http://172.29.0.1:8080@attic.monke.fail', 'attic.monke.fail',
+            'https://icicle.eel-ling.ts.net:8080', 'http://icicle.eel-ling.ts.net', 'http://icicle.eel-ling.ts.net:8081',
+            'http://icicle.eel-ling.ts.net:8080/other', 'http://other.eel-ling.ts.net:8080', 'http://100.126.145.24:8080',
+            'http://icicle.eel-ling.ts.net.evil.example:8080']
+
+
+class AtticServer(unittest.TestCase):
+    def load(self, **env):
+        scrubbed = {k: v for k, v in os.environ.items() if k != 'ATTIC_SERVER'}
+        with patch.dict(os.environ, dict(scrubbed, **env), clear=True):
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        return module
+
+    def test_public_cache_is_the_default(self):
+        for env in [{}, {'ATTIC_SERVER': ''}, {'ATTIC_SERVER': ' '}, {'ATTIC_SERVER': PUBLIC}, {'ATTIC_SERVER': PUBLIC + '/'}]:
+            with self.subTest(env=env):
+                module = self.load(**env)
+                self.assertEqual(module.CACHE, PUBLIC + '/flakey')
+                self.assertEqual(module.PUBLIC_CACHE, PUBLIC + '/flakey')
+
+    def test_internal_and_tailnet_servers_select_their_cache(self):
+        for server in [INTERNAL, TAILNET]:
+            for value in [server, server + '/']:
+                with self.subTest(value=value):
+                    module = self.load(ATTIC_SERVER=value)
+                    self.assertEqual(module.CACHE, server + '/flakey')
+                    self.assertEqual(module.PUBLIC_CACHE, PUBLIC + '/flakey')
+
+    def test_only_reviewed_origins_are_accepted(self):
+        for value in REJECTED:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError): c.attic_server({'ATTIC_SERVER': value})
+                with self.assertRaises(SystemExit) as stop: self.load(ATTIC_SERVER=value)
+                self.assertNotIn(value, str(stop.exception))
+
+    def test_reader_helper_agrees_with_the_release_tool(self):
+        for value in [None, '', PUBLIC, PUBLIC + '/', INTERNAL, INTERNAL + '/', TAILNET, TAILNET + '/'] + REJECTED:
+            with self.subTest(value=value):
+                env = {} if value is None else {'ATTIC_SERVER': value}
+                with patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != 'ATTIC_SERVER'}, clear=True):
+                    os.environ.update(env)
+                    try: expected = c.attic_server()
+                    except ValueError: expected = ValueError
+                    try: actual = reader.attic_server()
+                    except ValueError: actual = ValueError
+                self.assertEqual(actual, expected)
+
+    def audit_proof(self, cache):
+        rules = {'targets': {'aarch64-linux': []}}
+        with patch.object(c, 'CACHE', cache), patch.object(c, 'info', return_value={A: ENTRY}) as info, \
+                patch.object(c, 'run', return_value='') as run, patch.object(c, 'evaluated_roots', return_value=[A]), \
+                patch.object(c, 'remote_closure', return_value={A: ENTRY}):
+            closure = c.verify([A], {A: ENTRY}, {})
+            proof = c.digest({'commit': 'a'*40, 'policy': c.digest(rules), 'system': 'aarch64-linux', 'closure': closure})
+            record = {'commit': 'a'*40, 'policy': c.digest(rules), 'activationAuthorized': False,
+                      'proofs': {'aarch64-linux': proof}}
+            audited = c.audit(rules, 'a'*40, 'aarch64-linux', record, {})
+        self.assertEqual(run.call_args.args[run.call_args.args.index('--store') + 1], cache)
+        self.assertEqual({call.args[2] for call in info.call_args_list}, {cache})
+        return closure, proof, audited
+
+    def test_proofs_are_identical_whichever_transport_read_the_cache(self):
+        public = self.audit_proof(PUBLIC + '/flakey')
+        # A record written through one transport is accepted through the others.
+        for server in [INTERNAL, TAILNET]:
+            other = self.audit_proof(server + '/flakey')
+            self.assertEqual(public[:2], other[:2])
+            self.assertEqual(public[2], other[2])
+            self.assertNotIn('attic', json.dumps(other[2]))
+            self.assertNotIn('172.29', json.dumps(other[2]))
+            self.assertNotIn('ts.net', json.dumps(other[2]))
+
+    def test_diagnostics_never_carry_the_transport(self):
+        cached = dict(ENTRY, narSize=99)
+        for cache in [PUBLIC + '/flakey', INTERNAL + '/flakey', TAILNET + '/flakey']:
+            output = io.StringIO()
+            with patch.object(c, 'CACHE', cache), patch.object(c, 'info', return_value={A: cached}), \
+                    patch.object(c, 'run', return_value=''), contextlib.redirect_stdout(output):
+                c.verify([A], {A: ENTRY}, {})
+            self.assertNotIn('172.29', output.getvalue())
+            self.assertNotIn('ts.net', output.getvalue())
+            self.assertNotIn('monke.fail', output.getvalue())
+            self.assertEqual(json.loads(output.getvalue().splitlines()[0].split(': ', 1)[1])['origin'], 'attic')
+
+
+class ReaderEndpoint(unittest.TestCase):
+    def configure(self, **extra):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)/'home'
+            temporary = Path(directory)/'job'
+            temporary.mkdir()
+            config = home/'.config/nix/nix.conf'
+            config.parent.mkdir(parents=True)
+            config.write_text('sandbox = false\n')
+            env = {k: v for k, v in os.environ.items() if k != 'ATTIC_SERVER'}
+            env.update(HOME=str(home), RUNNER_TEMP=str(temporary), ATTIC_TOKEN='fixture-token', **extra)
+            result = subprocess.run([sys.executable, str(HELPER)], env=env, capture_output=True, text=True)
+            netrc = temporary/'flakey-attic.netrc'
+            return (result, netrc.read_text() if netrc.exists() else None, config.read_text(),
+                    oct(netrc.stat().st_mode & 0o777) if netrc.exists() else None)
+
+    def test_public_server_is_unchanged(self):
+        result, netrc, config, mode = self.configure()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(netrc, 'machine attic.monke.fail login ci password fixture-token\n')
+        self.assertEqual(mode, '0o600')
+        self.assertIn('extra-substituters = https://attic.monke.fail/flakey\n', config)
+        self.assertIn('extra-trusted-public-keys = ' + c.KEY + '\n', config)
+        self.assertNotIn('172.29', config)
+
+    def test_internal_server_scopes_the_credential_to_that_host_only(self):
+        result, netrc, config, mode = self.configure(ATTIC_SERVER=INTERNAL)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(netrc, 'machine 172.29.0.1 login ci password fixture-token\n')
+        self.assertEqual(mode, '0o600')
+        self.assertIn('extra-substituters = http://172.29.0.1:8080/flakey\n', config)
+        # Same keys: the internal endpoint serves the same signed cache.
+        self.assertIn('extra-trusted-public-keys = ' + c.KEY + '\n', config)
+        self.assertNotIn('attic.monke.fail', netrc + config)
+        self.assertNotIn('ts.net', netrc + config)
+        self.assertNotIn('fixture-token', config + result.stdout + result.stderr)
+
+    def test_tailnet_server_scopes_the_credential_to_its_host_only(self):
+        result, netrc, config, mode = self.configure(ATTIC_SERVER=TAILNET)
+        self.assertEqual(result.returncode, 0)
+        # Host only, as netrc matches: no port, scheme or other origin.
+        self.assertEqual(netrc, 'machine icicle.eel-ling.ts.net login ci password fixture-token\n')
+        self.assertEqual(mode, '0o600')
+        self.assertIn('extra-substituters = http://icicle.eel-ling.ts.net:8080/flakey\n', config)
+        self.assertIn('extra-trusted-public-keys = ' + c.KEY + '\n', config)
+        self.assertNotIn('attic.monke.fail', netrc + config)
+        self.assertNotIn('172.29', netrc + config)
+        self.assertNotIn('fixture-token', config + result.stdout + result.stderr)
+
+    def test_unreviewed_server_writes_no_credential_and_no_config(self):
+        for value in REJECTED:
+            with self.subTest(value=value):
+                result, netrc, config, _ = self.configure(ATTIC_SERVER=value)
+                self.assertEqual(result.returncode, 1)
+                self.assertIsNone(netrc)
+                self.assertEqual(config, 'sandbox = false\n')
+                self.assertNotIn('fixture-token', result.stdout + result.stderr)
+
+    def test_cleanup_still_removes_the_internal_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)/'home'
+            temporary = Path(directory)/'job'
+            temporary.mkdir()
+            env = dict(os.environ, HOME=str(home), RUNNER_TEMP=str(temporary), ATTIC_TOKEN='fixture-token', ATTIC_SERVER=INTERNAL)
+            subprocess.run([sys.executable, str(HELPER)], env=env, capture_output=True, check=True)
+            subprocess.run([sys.executable, str(HELPER), '--cleanup'], env=env, capture_output=True, check=True)
+            self.assertFalse((temporary/'flakey-attic.netrc').exists())
+            self.assertNotIn('172.29', (home/'.config/nix/nix.conf').read_text())
+
+
 @unittest.skipUnless(shutil.which('nix'), 'Nix required for signed cache fixture')
 class RealCache(unittest.TestCase):
     def test_local_output_cannot_hide_corrupt_missing_or_unsigned_cache(self):
@@ -223,6 +410,42 @@ class RealCache(unittest.TestCase):
                 nar.unlink()
                 with self.assertRaises(RuntimeError): c.verify([path], expected, dict(c.os.environ))
                 self.assertIn(path, c.info([path], dict(c.os.environ)))
+
+
+class RetentionDiagnostics(unittest.TestCase):
+    def test_ledger_fetch_failure_reports_retention_phase(self):
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['release-channel.py', 'retain', '--system', 'x86_64-linux']), \
+             patch.object(c, 'policy', return_value={}), \
+             patch.object(c, 'release_refs', side_effect=c.CommandFailure('transport (exit 128)')), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(c.main(), 1)
+        self.assertIn('failed during read-release-ledgers: transport (exit 128)', output.getvalue())
+        self.assertIn('the previous channel is retained', output.getvalue())
+
+    def test_retained_audit_failures_report_the_operation_without_private_values(self):
+        rules = {'targets': {'x86_64-linux': []}}
+        sha = 'a'*40
+        record = {'commit': sha, 'policy': c.digest(rules), 'activationAuthorized': False,
+                  'proofs': {'x86_64-linux': 'b'*64}}
+        failures = [('evaluated_roots', 'evaluate-retained-roots'),
+                    ('remote_closure', 'discover-retained-closure'),
+                    ('verify', 'verify-retained-cache')]
+        for operation, expected_phase in failures:
+            with self.subTest(operation=operation):
+                output = io.StringIO()
+                with patch.object(sys, 'argv', ['release-channel.py', 'retain', '--system', 'x86_64-linux']), \
+                     patch.object(c, 'retain', side_effect=lambda system: c.audit(rules, sha, system, record, {})), \
+                     patch.object(c, 'evaluated_roots', return_value=[A]), \
+                     patch.object(c, 'remote_closure', return_value={A: ENTRY}), \
+                     patch.object(c, 'verify', return_value='c'*64), \
+                     patch.object(c, operation, side_effect=c.CommandFailure('command-failed (exit 4)')), \
+                     contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    self.assertEqual(c.main(), 1)
+                self.assertIn('failed during '+expected_phase+': command-failed (exit 4)', output.getvalue())
+                self.assertIn('the previous channel is retained', output.getvalue())
+                self.assertNotIn('/nix/store', output.getvalue())
+                self.assertNotIn(sha, output.getvalue())
 
 
 class RetentionSelection(unittest.TestCase):

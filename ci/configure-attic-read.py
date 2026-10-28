@@ -8,9 +8,24 @@ from pathlib import Path
 import re
 import sys
 import time
+from urllib.parse import urlsplit
 
 START = "# BEGIN managed private cache reads\n"
 END = "# END managed private cache reads\n"
+PUBLIC_ATTIC = "https://attic.monke.fail"
+# Same cache and keys, reachable only from jobs on the icicle `nix` runner.
+INTERNAL_ATTIC = "http://172.29.0.1:8080"
+# The same listener over the tailnet, for the host-mode braco runner.
+TAILNET_ATTIC = "http://icicle.eel-ling.ts.net:8080"
+REVIEWED_ATTIC = {PUBLIC_ATTIC, INTERNAL_ATTIC, TAILNET_ATTIC}
+
+
+def attic_server():
+    """Mirror of release-channel.py: only the three reviewed origins, public by default."""
+    value = os.environ.get("ATTIC_SERVER", "").strip().rstrip("/")
+    if value and value not in REVIEWED_ATTIC:
+        raise ValueError("ATTIC_SERVER is not a reviewed Attic origin")
+    return value or PUBLIC_ATTIC
 
 
 def unique_object(pairs):
@@ -74,6 +89,7 @@ def pull_token():
 
 
 def configure(pr_read=False):
+    server = attic_server()
     if pr_read:
         reviewed_pr()
         token = pull_token()
@@ -85,12 +101,13 @@ def configure(pr_read=False):
     netrc = directory / "flakey-attic.netrc"
     descriptor = os.open(netrc, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as stream:
-        stream.write("machine attic.monke.fail login ci password " + token + "\n")
+        # Only the host this job contacts: the other origin never sees the token.
+        stream.write("machine " + urlsplit(server).hostname + " login ci password " + token + "\n")
     config = Path.home() / ".config/nix/nix.conf"
     config.parent.mkdir(parents=True, exist_ok=True)
     with config.open("a") as stream:
         stream.write("\n" + START)
-        stream.write("extra-substituters = https://attic.monke.fail/flakey\n")
+        stream.write("extra-substituters = " + server + "/flakey\n")
         stream.write("always-allow-substitutes = true\n")
         stream.write("extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=\n")
         stream.write("netrc-file = " + str(netrc) + "\n")

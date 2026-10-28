@@ -76,7 +76,7 @@ pub fn serve(uri: http::Uri, responder: RequestAsyncResponder) {
         let file_path = query
             .split('&')
             .find_map(|part| part.strip_prefix("p="))
-            .map(&decode)
+            .map(decode)
             .unwrap_or_default();
         // A library entity: the daemon resolves it, because a server cover
         // is signed with credentials that never leave it.

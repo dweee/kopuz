@@ -1,9 +1,9 @@
 {
-  "release-channel.py": "61a002b6a3efbdb69985a041db56927e264f5b99b9551f870962024734f93931",
-  "test-release-channel.py": "f8f52d077aa9177dbb34797d7ff79b111378e1313668ce017c44b5884a061beb",
-  "update-inputs.py": "ebcb43ac7cd25684ea22d4b47facebe90607885b8734a46c1331b8441d7b7795",
+  "release-channel.py": "5b8ef4305f8ef55bfa88bd64d6aa7da1c5ec9d0a58dbeb5c28865e00c05c8eb0",
+  "test-release-channel.py": "96eafc92765026c035fb23f338ecb8de78e1e45e7318b8742959d93b80e74c54",
+  "update-inputs.py": "679e008dbbe480fc48488e26a9dd773066e618e8be7cb33890ae8a5ca0ce90a8",
   "update-monitor.py": "ff1867c18ef4f549a0d7f84eb828f6a3e44b1575d4d42113bca770ff06e09c74",
-  "test-update-automation.py": "2f0a8dd99cce09038d30d64003de9cfc73138d8157537ee6c4394117fc38d90f",
-  "automation-forge.py": "7e46b08b6ef6f44eb72fb94adb10ec180aa6cccc7d038ce6f93b5ca7c8982874",
-  "configure-attic-read.py": "f681b28c5252dfbb57c1ed46411b7411f1878351d54545c16be88707c5d2475e"
+  "test-update-automation.py": "a19c6716b2aa8460f547060eca62c059b05c1ede806edda1686b44c027ae20d6",
+  "automation-forge.py": "d51f4dca8ba6dc50aef80869c5c72c6fae8c1f472ca2f83b18635c9111da5b52",
+  "configure-attic-read.py": "4b663ae0e073327dbcdcdaabef23a58a0a241f2f0fcfe3fd5f351b9242cbf669"
 }

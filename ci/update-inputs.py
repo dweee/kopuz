@@ -7,6 +7,7 @@ files are written exclusively by Nix. No merge, promotion or deployment.
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -27,14 +28,36 @@ def phase(label):
     print('Input update phase: ' + label, flush=True)
 
 
+def safe_detail(diagnostic, token=''):
+    # Last few Nix error lines, with credentials, URLs' userinfo and long output removed.
+    lines = [l.strip() for l in diagnostic.splitlines() if l.strip().startswith('error:')][-3:]
+    text = ' | '.join(lines)
+    if token:
+        text = text.replace(token, '***')
+    text = re.sub(r'(https?://)[^/@\s]+@', r'\1***@', text)
+    text = re.sub(r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+', '***', text)
+    return text[:300]
+
+
 def run(*args):
+    env = None
+    token = os.environ.get('GH_TOKEN', '')
+    if token:
+        # Authenticated GitHub API reads avoid the shared anonymous rate limit.
+        # The token travels in the environment, never on a command line.
+        env = dict(os.environ, NIX_CONFIG=os.environ.get('NIX_CONFIG', '') + '\naccess-tokens = github.com=' + token + '\n')
     try:
-        result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, timeout=3600)
+        result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=3600)
     except subprocess.TimeoutExpired:
         raise channel.CommandFailure('command deadline exceeded') from None
     if result.returncode:
-        kind = channel.failure_category((result.stderr or '') + '\n' + (result.stdout or ''))
-        raise channel.CommandFailure(kind + ' (exit ' + str(result.returncode) + ')')
+        diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
+        kind = channel.failure_category(diagnostic)
+        message = kind + ' (exit ' + str(result.returncode) + ')'
+        detail = safe_detail(diagnostic, token)
+        if detail:
+            message += ': ' + detail
+        raise channel.CommandFailure(message)
     return result.stdout.strip()
 
 
@@ -75,8 +98,13 @@ def instantiation_expression(system):
         raise ValueError('Unexpected builder system')
     # The same Git view `nix flake check .` evaluates, including any declared
     # self.submodules setting.
+    # Skip packages that nixpkgs marks unavailable/broken/insecure, and tolerate
+    # packages whose platform metadata still does not match this system. The
+    # goal is to realise IFD inputs, not to force every package to evaluate.
     return ('let f = builtins.getFlake ' + json.dumps('git+file://' + str(ROOT)) + '; '
-            'drvs = output: builtins.mapAttrs (_: p: p.drvPath) ((f.${output} or {}).' + system + ' or {}); '
+            'skip = [ "wiicompiled-vr-openxr" ]; '
+            'drvs = output: builtins.mapAttrs (_: p: let r = builtins.tryEval (builtins.deepSeq p.drvPath p.drvPath); in if r.success then r.value else null) '
+            '(builtins.removeAttrs ((f.${output} or {}).' + system + ' or {}) skip); '
             'in { packages = drvs "packages"; checks = drvs "checks"; }')
 
 
@@ -105,7 +133,9 @@ def update():
         catalog = json.loads(run('nix', 'flake', 'metadata', '--json', '--refresh',
                                  '--option', 'accept-flake-config', 'false',
                                  '--no-write-lock-file', overrides[alignment['input']]))
-        catalog_lock = json.loads((Path(catalog['path']) / 'flake.lock').read_text())
+        # Newer Nix may not materialise `path` in the store (lazy trees); the
+        # metadata always carries the catalog's own lock graph.
+        catalog_lock = catalog['locks']
         for name in alignment['inputs']:
             overrides[name] = pin_url(root_node(catalog_lock, name)['locked'])
             if not overrides[name]:

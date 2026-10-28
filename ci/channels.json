@@ -26,5 +26,9 @@
   "forge": "github",
   "repository": "dweee/kopuz",
   "branch": "flakey",
-  "remote": "https://github.com/dweee/kopuz.git"
+  "remote": "https://github.com/dweee/kopuz.git",
+  "inputCheckWorkflows": [
+    "release-channels.yml",
+    "native.yml"
+  ]
 }

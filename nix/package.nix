@@ -22,12 +22,15 @@
     inherit craneLib;
   };
   cargoVendorDir = craneLib.vendorCargoDeps {src = source;};
-  qobuzTests = upstream.overrideAttrs (_: {
+  # CMake build trees retain absolute sandbox paths in inherited Cargo artifacts.
+  clearOpusCMakeCache = builtins.readFile ./clear-opus-cmake-cache.sh;
+  qobuzTests = upstream.overrideAttrs (old: {
     inherit cargoVendorDir;
     pname = "kopuz-qobuz-tests";
     src = source;
     cargoArtifacts = compiled;
     doInstallCargoArtifacts = false;
+    preBuild = (old.preBuild or "") + clearOpusCMakeCache;
     # rustls-platform-verifier initializes its trust store when Client is built,
     # including for loopback fixture tests. The sandbox has no host /etc/ssl.
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
@@ -46,6 +49,7 @@
     inherit cargoVendorDir;
     version = "0.21.0-qobuz";
     src = source;
+    preBuild = (old.preBuild or "") + clearOpusCMakeCache;
     __intentionallyOverridingVersion = true;
     KOPUZ_GIT_COMMIT =
       if gitRev == null

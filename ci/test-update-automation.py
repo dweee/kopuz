@@ -26,6 +26,20 @@ a = load('automation-forge')
 
 
 class Updates(unittest.TestCase):
+    def test_updater_failure_detail_redacts_credentials(self):
+        text = 'noise\nerror: unable to download https://u:p@api.github.com/x: HTTP error 403 ghp_abcDEF123 secret-tok'
+        detail = u.safe_detail(text, 'secret-tok')
+        self.assertIn('HTTP error 403', detail)
+        for leaked in ['u:p', 'ghp_', 'secret-tok', 'noise']:
+            self.assertNotIn(leaked, detail)
+
+    def test_updater_gives_nix_the_github_token_through_the_environment_only(self):
+        done = subprocess.CompletedProcess([], 0, 'ok', '')
+        with patch.object(u.subprocess, 'run', return_value=done) as run, patch.dict(u.os.environ, {'GH_TOKEN': 'tok'}):
+            u.run('nix', 'flake', 'lock')
+        self.assertIn('access-tokens = github.com=tok', run.call_args.kwargs['env']['NIX_CONFIG'])
+        self.assertNotIn('tok', run.call_args.args)
+
     def test_renamed_repository_redirect_keeps_auth_on_the_same_api_host(self):
         source = 'https://api.github.com/repos/old/name/releases/latest'
         target = 'https://api.github.com/repositories/123/releases/latest'
@@ -140,6 +154,17 @@ class FailureDiagnostics(unittest.TestCase):
         self.assertIn('validate-candidate: command deadline exceeded', error.getvalue())
         self.assertNotIn(secret, output.getvalue()+error.getvalue())
 
+    def test_existing_input_branch_is_reused_and_other_errors_propagate(self):
+        rules = {'forge': 'forgejo'}
+        with patch.object(a, 'api', return_value={'name': 'b'}) as call:
+            self.assertTrue(a.branch_exists(rules, '/repos/o/r', 'automation/input-updates-ab'))
+        self.assertEqual(call.call_args.args[2], '/repos/o/r/branches/automation/input-updates-ab')
+        with patch.object(a, 'api', side_effect=HTTPError('u', 404, 'm', None, None)):
+            self.assertFalse(a.branch_exists(rules, '/repos/o/r', 'x'))
+        with patch.object(a, 'api', side_effect=HTTPError('u', 403, 'm', None, None)):
+            with self.assertRaises(HTTPError):
+                a.branch_exists(rules, '/repos/o/r', 'x')
+
     def test_publication_reports_http_permission_failure_without_credentialed_url(self):
         secret = 'fixture-sensitive-writer-value'
         def publish(rules):
@@ -189,6 +214,35 @@ class ImportFromDerivation(unittest.TestCase):
             value = subprocess.run(['nix', 'eval', '--impure', '--json', '--expr', expression],
                                    cwd=root, text=True, capture_output=True, check=True).stdout
             self.assertEqual(json.loads(value), {'packages': {}, 'checks': {}})
+
+
+class CatalogAlignment(unittest.TestCase):
+    def test_alignment_reads_the_catalog_lock_from_metadata_not_the_store_path(self):
+        pin = {'type': 'github', 'owner': 'o', 'repo': 'r', 'rev': 'a'*40}
+        catalog = {'path': '/nonexistent/lazy-tree', 'locks': {'root': 'root', 'nodes': {
+            'root': {'inputs': {'nixpkgs': 'nixpkgs_2'}}, 'nixpkgs_2': {'locked': pin}}}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'ci').mkdir()
+            (root/'ci/tracking-inputs.json').write_text(json.dumps({'version': 1, 'inputs': {
+                'catalog': {'source': 'github:o/catalog/tested'}, 'nixpkgs': {'source': 'github:o/nixpkgs'}},
+                'alignWith': {'input': 'catalog', 'inputs': ['nixpkgs']}}))
+            (root/'flake.lock').write_text(json.dumps({'root': 'root', 'version': 7, 'nodes': {
+                'root': {'inputs': {'catalog': 'catalog', 'nixpkgs': 'nixpkgs'}},
+                'catalog': {'original': {'type': 'github'}}, 'nixpkgs': {'original': {'type': 'github'}}}}))
+            calls = []
+            def fake_run(*args):
+                calls.append(args)
+                if args[:3] == ('nix', 'flake', 'metadata'):
+                    return json.dumps(catalog)
+                if args[:3] == ('nix', 'flake', 'lock'):
+                    raise u.channel.CommandFailure('stop after alignment')
+                return ''
+            with patch.object(u, 'ROOT', root), patch.object(u, 'run', fake_run):
+                with self.assertRaisesRegex(u.channel.CommandFailure, 'stop after alignment'):
+                    u.update()
+            lock = next(c for c in calls if c[:3] == ('nix', 'flake', 'lock'))
+            self.assertEqual(lock[lock.index('nixpkgs') + 1], 'github:o/r/' + 'a'*40)
 
 
 @unittest.skipUnless(shutil.which('nix'), 'Nix required for lock updater fixture')

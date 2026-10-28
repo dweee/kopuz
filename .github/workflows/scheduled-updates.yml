@@ -2,12 +2,13 @@
 name: Input and manual version monitoring
 'on':
   schedule:
-  - cron: 17 */6 * * *
+  - cron: 13 5,11,17,23 * * *
   workflow_dispatch: {}
 permissions:
   contents: write
   issues: write
   pull-requests: write
+  actions: write
 concurrency:
   group: scheduled-input-updates
   cancel-in-progress: false
@@ -64,6 +65,8 @@ jobs:
           max-jobs = 1
           cores = 1
     - name: Resolve every tracked input and validate the exact candidate
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: python3 ci/update-inputs.py
     - name: Open a review PR for changed pins
       env:

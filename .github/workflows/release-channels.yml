@@ -4,9 +4,8 @@ name: Verified release channels
   push:
     branches:
     - flakey
-  pull_request: {}
   schedule:
-  - cron: 43 3 * * *
+  - cron: 41 2 * * *
   workflow_dispatch:
     inputs:
       channel:
@@ -22,7 +21,7 @@ name: Verified release channels
 permissions:
   contents: read
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('verified-release-pr-{0}', github.ref) || 'verified-release-channels' }}
+  group: verified-release-channels
   cancel-in-progress: false
 jobs:
   test:
@@ -80,12 +79,12 @@ jobs:
           experimental-features = nix-command flakes
           accept-flake-config = false
           max-jobs = 1
-          cores = 1
+          cores = 0
     - name: Configure job-local private cache reader
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/configure-attic-read.py
-    - name: Build complete native inventory, upload, verify remote NAR bytes
+    - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
@@ -153,7 +152,7 @@ jobs:
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/configure-attic-read.py
-    - name: Build complete native inventory, upload, verify remote NAR bytes
+    - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
@@ -221,7 +220,7 @@ jobs:
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/configure-attic-read.py
-    - name: Build complete native inventory, upload, verify remote NAR bytes
+    - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}

@@ -23,18 +23,24 @@ jobs:
       - name: Reclaim unused hosted Linux SDK space
         if: runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3
         with:
-          nix_version: "2.34.7"
-          enable_kvm: false
-          nix_conf: |
-            experimental-features = nix-command flakes
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes parallel-eval
+            eval-cores = 2
             accept-flake-config = false
             substituters = https://cache.nixos.org/
             extra-substituters =
             extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=
             max-jobs = 1
             cores = 3
+      - name: Verify Determinate client and daemon
+        run: |
+          nix --version | grep -F 'Determinate Nix 3.24.1'
+          nix store info --store daemon --json
       - name: Configure authenticated private cache reads for trusted builds
         if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         env:
@@ -83,18 +89,24 @@ jobs:
       - name: Reclaim unused hosted Linux SDK space
         if: runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3
         with:
-          nix_version: "2.34.7"
-          enable_kvm: false
-          nix_conf: |
-            experimental-features = nix-command flakes
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes parallel-eval
+            eval-cores = 2
             accept-flake-config = false
             substituters = https://cache.nixos.org/
             extra-substituters =
             extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=
             max-jobs = 1
             cores = 3
+      - name: Verify Determinate client and daemon
+        run: |
+          nix --version | grep -F 'Determinate Nix 3.24.1'
+          nix store info --store daemon --json
       - name: Configure authenticated private cache reads for trusted builds
         if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         env:
@@ -164,15 +176,21 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3 # v3
         with:
-          nix_version: "2.34.7"
-          enable_kvm: false
-          nix_conf: |
-            experimental-features = nix-command flakes
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes parallel-eval
+            eval-cores = 2
             accept-flake-config = false
             substituters = https://cache.nixos.org/
             extra-substituters =
+      - name: Verify Determinate client and daemon
+        run: |
+          nix --version | grep -F 'Determinate Nix 3.24.1'
+          nix store info --store daemon --json
       - name: Install the trusted pinned Attic client before importing build data
         id: attic
         timeout-minutes: 15

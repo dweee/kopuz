@@ -24,7 +24,20 @@ jobs:
         fetch-depth: 0
         submodules: false
         persist-credentials: false
+    - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+      if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
+      with:
+        source-tag: v3.24.1
+        summarize: false
+        kvm: false
+        extra-conf: |
+          experimental-features = nix-command flakes parallel-eval
+          eval-cores = 2
+          accept-flake-config = false
+          max-jobs = 1
+          cores = 1
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
+      if: ${{ runner.os == 'macOS' && runner.arch == 'X64' }}
       with:
         nix_version: 2.34.7
         enable_kvm: false
@@ -33,6 +46,11 @@ jobs:
           accept-flake-config = false
           max-jobs = 1
           cores = 1
+    - name: Check Determinate Nix and daemon
+      if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
+      run: |-
+        nix --version | grep -F 'Determinate Nix 3.24.1'
+        nix store info --store daemon --json
     - name: Monitor manual package/file pins
       id: monitor
       env:
@@ -55,7 +73,20 @@ jobs:
         fetch-depth: 0
         submodules: false
         persist-credentials: false
+    - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+      if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
+      with:
+        source-tag: v3.24.1
+        summarize: false
+        kvm: false
+        extra-conf: |
+          experimental-features = nix-command flakes parallel-eval
+          eval-cores = 2
+          accept-flake-config = false
+          max-jobs = 1
+          cores = 1
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
+      if: ${{ runner.os == 'macOS' && runner.arch == 'X64' }}
       with:
         nix_version: 2.34.7
         enable_kvm: false
@@ -64,6 +95,11 @@ jobs:
           accept-flake-config = false
           max-jobs = 1
           cores = 1
+    - name: Check Determinate Nix and daemon
+      if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
+      run: |-
+        nix --version | grep -F 'Determinate Nix 3.24.1'
+        nix store info --store daemon --json
     - name: Resolve every tracked input and validate the exact candidate
       env:
         GH_TOKEN: ${{ github.token }}

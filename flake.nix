@@ -1,6 +1,6 @@
 {
   description = "Kopuz with native Qobuz support";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/5f9880cb30e73e4f8090e9e69acba3b14c0bd5bd";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/cc594d5b32ee60accfed23759c7df2d1368416b2";
   outputs = {
     self,
     nixpkgs,

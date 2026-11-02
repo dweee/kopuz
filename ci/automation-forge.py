@@ -107,6 +107,7 @@ def branch_exists(rules, prefix, branch):
     return True
 
 
+PR_CHECKS = 'pr-checks.yml'
 INPUT_MARKER = '<!-- tracked-input-update -->'
 INPUT_FILES = {'flake.nix', 'flake.lock', 'nix/forks.json'}
 
@@ -122,14 +123,24 @@ def dispatch_input_checks(rules, prefix, pr):
     if rules['forge'] != 'github':
         return
     branch, sha = pr['head']['ref'], pr['head']['sha']
-    for workflow in rules.get('inputCheckWorkflows', []):
+    configured = rules.get('inputCheckWorkflows', [])
+    # A PR opened with the workflow token starts no pull_request run, so the
+    # required `test` check is reported by dispatching the PR checks workflow too.
+    for workflow in configured + ([] if PR_CHECKS in configured else [PR_CHECKS]):
         if not re.fullmatch(r'[A-Za-z0-9_-]+[.]ya?ml', workflow):
             raise ValueError('Invalid input check workflow')
         endpoint = prefix + '/actions/workflows/' + workflow
-        runs = api(rules, 'GET', endpoint + '/runs?head_sha=' + sha + '&per_page=1')
-        if not runs.get('workflow_runs'):
-            phase('dispatch-input-checks')
-            api(rules, 'POST', endpoint + '/dispatches', {'ref': branch})
+        try:
+            runs = api(rules, 'GET', endpoint + '/runs?head_sha=' + sha + '&per_page=1' + ('&event=workflow_dispatch' if workflow == PR_CHECKS else ''))
+            if not runs.get('workflow_runs'):
+                phase('dispatch-input-checks')
+                api(rules, 'POST', endpoint + '/dispatches', {'ref': branch})
+        except HTTPError as error:
+            error.close()
+            # The implicit PR checks workflow may not be dispatchable on older installs.
+            if workflow in configured or error.code not in (404, 422):
+                raise
+            print('PR checks workflow cannot be dispatched; update the installed automation')
 
 
 def consolidate_input_prs(rules, prefix, prs, current):

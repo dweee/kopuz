@@ -46,6 +46,23 @@ class Gates(unittest.TestCase):
         self.assertNotIn('fixture-secret', str(raised.exception))
         self.assertNotIn('/nix/store', str(raised.exception))
 
+    def test_read_only_nix_commands_retry_transient_failures_only(self):
+        bad = subprocess.CompletedProcess(['nix'], 1, stdout='', stderr='error: HTTP/2 framing error')
+        good = subprocess.CompletedProcess(['nix'], 0, stdout='ok\n', stderr='')
+        with patch.object(c.subprocess, 'run', side_effect=[bad, good]) as run, patch.object(c.time, 'sleep'):
+            self.assertEqual(c.run('nix', 'path-info', 'x'), 'ok')
+        self.assertEqual(run.call_count, 2)
+        missing = subprocess.CompletedProcess(['nix'], 1, stdout='', stderr="error: Cannot build '/nix/store/" + 'a'*32 + "-src.drv'")
+        with patch.object(c.subprocess, 'run', side_effect=[missing, good]), patch.object(c.time, 'sleep'):
+            self.assertEqual(c.run('nix', 'eval', 'x'), 'ok')
+        # A build is never retried, and neither is a non-transient failure.
+        with patch.object(c.subprocess, 'run', return_value=bad) as run, patch.object(c.time, 'sleep'):
+            with self.assertRaises(c.CommandFailure): c.run('nix', 'build', 'x')
+        self.assertEqual(run.call_count, 1)
+        with patch.object(c.subprocess, 'run', return_value=missing) as run, patch.object(c.time, 'sleep'):
+            with self.assertRaises(c.CommandFailure): c.run('nix', 'path-info', 'x')
+        self.assertEqual(run.call_count, 1)
+
     def test_command_failure_detail_is_redacted(self):
         diagnostic = ('building\nerror: unable to download \'https://user:fixture-secret@host/x\': '
                       'HTTP error 503 for /nix/store/' + 'a'*32 + '-private ghp_abc123')

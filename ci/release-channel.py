@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_ATTIC = 'https://attic.monke.fail'
@@ -94,19 +95,44 @@ def safe_detail(diagnostic):
     return text[:300]
 
 
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 20
+# Read-only Nix commands that only fetch metadata or sources. Builds are never retried.
+RETRYABLE = {'eval', 'path-info', 'copy', 'store'}
+
+
+def retryable_failure(args, diagnostic):
+    """Transient network or substitution failures of read-only Nix commands.
+
+    Evaluation runs with builds disabled, so "Cannot build" there means a
+    source or substitute could not be fetched, not a genuine build failure.
+    """
+    if len(args) < 2 or args[0] != 'nix' or args[1] not in RETRYABLE:
+        return False
+    if failure_category(diagnostic) == 'transport':
+        return True
+    return args[1] == 'eval' and bool(re.search(r"cannot build '", diagnostic, re.I))
+
+
 def run(*args, env=None):
-    try:
-        result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
-    except subprocess.TimeoutExpired:
-        raise CommandFailure('command deadline exceeded') from None
-    if result.returncode:
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
+        except subprocess.TimeoutExpired:
+            raise CommandFailure('command deadline exceeded') from None
+        if not result.returncode:
+            return result.stdout.strip()
         # Nix diagnostics may contain private paths or authenticated URLs. Emit
         # the classification, the status and a redacted tail of Nix error lines.
         diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
+        if attempt < RETRY_ATTEMPTS and retryable_failure(args, diagnostic):
+            print('Retrying transient ' + failure_category(diagnostic) + ' failure of nix '
+                  + args[1] + ' (attempt ' + str(attempt) + ' of ' + str(RETRY_ATTEMPTS) + ')', flush=True)
+            time.sleep(RETRY_DELAY * attempt)
+            continue
         message = failure_category(diagnostic) + ' (exit ' + str(result.returncode) + ')'
         detail = safe_detail(diagnostic)
         raise CommandFailure(message + (': ' + detail if detail else ''))
-    return result.stdout.strip()
 
 
 def digest(value):
@@ -217,7 +243,8 @@ def remote_env(env, directory):
                 NIX_CONFIG=env.get('NIX_CONFIG', '') + '\nsubstituters =\nextra-substituters =\n'
                 'trusted-public-keys = ' + KEY + ' ' + UPSTREAM_KEY + '\nextra-trusted-public-keys =\n'
                 'require-sigs = true\nfallback = false\nnarinfo-cache-negative-ttl = 0\n'
-                'narinfo-cache-positive-ttl = 86400\ndownload-attempts = 3\n')
+                'narinfo-cache-positive-ttl = 86400\ndownload-attempts = 5\n'
+                'http2 = ' + ('true' if os.environ.get('ATTIC_HTTP2') == 'true' else 'false') + '\n')
 
 
 def verify(roots, expected, env):

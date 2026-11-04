@@ -1,24 +1,14 @@
 {
   pkgs,
   lib,
+  craneLib,
   source ? ../.,
   gitRev ? null,
   ...
 }: let
-  upstreamSource = pkgs.fetchFromGitHub {
-    owner = "Kopuz-org";
-    repo = "kopuz";
-    rev = "552400339461ef09c09d4db133bf356ea8fead18";
-    hash = "sha256-NbWq8mMYI14pJTlC1EXRJi5nEeRx+zvzaQVleRA1ZLY=";
-  };
-  craneSource = pkgs.fetchFromGitHub {
-    owner = "ipetkov";
-    repo = "crane";
-    rev = "80db5bdc391be8a1794f6d8a2d56e3a84ebcede2";
-    hash = "sha256-G6R9IT/xwFuu+CYBWDUAok6AdC4ERC4ZfPPFtEpxnZE=";
-  };
-  craneLib = import craneSource {inherit pkgs;};
-  upstream = pkgs.callPackage (upstreamSource + /packaging/nix/crane.nix) {
+  # Upstream's recipe from this fork's own tree (it carries upstream history),
+  # so evaluation imports no fetched source.
+  upstream = pkgs.callPackage ../packaging/nix/crane.nix {
     inherit craneLib;
   };
   cargoVendorDir = craneLib.vendorCargoDeps {src = source;};
@@ -80,7 +70,7 @@
       (old.passthru or {})
       // {
         qobuzEnabled = true;
-        inherit upstreamSource qobuzTests;
+        inherit qobuzTests;
       };
     meta =
       old.meta

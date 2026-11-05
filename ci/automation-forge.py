@@ -6,12 +6,15 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
+sys.dont_write_bytecode = True  # see release-channel.py
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('channel', ROOT / 'ci/release-channel.py')
 channel = importlib.util.module_from_spec(spec)
@@ -48,7 +51,33 @@ def failure_detail(error):
     return 'validation-failed' if kind == 'command-failed' else kind
 
 
+# Idempotent reads are retried after transport failures; writes are never retried.
+API_RETRY_DELAYS = (5, 20)
+API_RETRY_STATUS = {502, 503, 504}
+
+
+def transient_api_failure(error):
+    if isinstance(error, HTTPError):
+        return error.code in API_RETRY_STATUS
+    return isinstance(error, (URLError, socket.timeout, TimeoutError, ConnectionError))
+
+
 def api(rules, method, endpoint, data=None):
+    delays = iter(API_RETRY_DELAYS if method == 'GET' else ())
+    while True:
+        try:
+            return api_once(rules, method, endpoint, data)
+        except (HTTPError, URLError, OSError) as error:
+            delay = next(delays, None)
+            if delay is None or not transient_api_failure(error):
+                raise
+            if isinstance(error, HTTPError):
+                error.close()
+            print('Retrying ' + method + ' after a transient API failure in ' + str(delay) + 's', file=sys.stderr, flush=True)
+            time.sleep(delay)
+
+
+def api_once(rules, method, endpoint, data=None):
     origin = 'https://api.github.com' if rules['forge'] == 'github' else 'https://git.monke.fail/api/v1'
     token = os.environ.get('AUTOMATION_TOKEN', '')
     if not token:

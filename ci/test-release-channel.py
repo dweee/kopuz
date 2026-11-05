@@ -67,7 +67,7 @@ class Gates(unittest.TestCase):
         diagnostic = ('building\nerror: unable to download \'https://user:fixture-secret@host/x\': '
                       'HTTP error 503 for /nix/store/' + 'a'*32 + '-private ghp_abc123')
         result = subprocess.CompletedProcess(['nix'], 1, stdout='', stderr=diagnostic)
-        with patch.object(c.subprocess, 'run', return_value=result):
+        with patch.object(c.subprocess, 'run', return_value=result), patch.object(c, 'TRANSPORT_RETRY_DELAYS', ()):
             with self.assertRaises(c.CommandFailure) as raised: c.run('nix', 'build')
         text = str(raised.exception)
         self.assertTrue(text.startswith('transport (exit 1): error: unable to download'))
@@ -247,10 +247,17 @@ REJECTED = ['http://attic.monke.fail', 'https://attic.example', 'http://172.29.0
 class AtticServer(unittest.TestCase):
     def load(self, **env):
         scrubbed = {k: v for k, v in os.environ.items() if k != 'ATTIC_SERVER'}
-        with patch.dict(os.environ, dict(scrubbed, **env), clear=True):
+        with patch.dict(os.environ, dict(scrubbed, **env), clear=True), patch.object(Path, 'read_text', return_value='{"forge":"github"}'):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
         return module
+
+    def test_forgejo_uses_niks3_and_its_own_key(self):
+        with patch.object(Path, 'read_text', return_value='{"forge":"forgejo"}'):
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        self.assertEqual(module.CACHE, 'https://niks3.monke.fail')
+        self.assertEqual(module.KEY, 'niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=')
 
     def test_public_cache_is_the_default(self):
         for env in [{}, {'ATTIC_SERVER': ''}, {'ATTIC_SERVER': ' '}, {'ATTIC_SERVER': PUBLIC}, {'ATTIC_SERVER': PUBLIC + '/'}]:
@@ -346,7 +353,7 @@ class ReaderEndpoint(unittest.TestCase):
         self.assertEqual(netrc, 'machine attic.monke.fail login ci password fixture-token\n')
         self.assertEqual(mode, '0o600')
         self.assertIn('extra-substituters = https://attic.monke.fail/flakey\n', config)
-        self.assertIn('extra-trusted-public-keys = ' + c.KEY + '\n', config)
+        self.assertIn('extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=\n', config)
         self.assertNotIn('172.29', config)
 
     def test_internal_server_scopes_the_credential_to_that_host_only(self):
@@ -356,7 +363,7 @@ class ReaderEndpoint(unittest.TestCase):
         self.assertEqual(mode, '0o600')
         self.assertIn('extra-substituters = http://172.29.0.1:8080/flakey\n', config)
         # Same keys: the internal endpoint serves the same signed cache.
-        self.assertIn('extra-trusted-public-keys = ' + c.KEY + '\n', config)
+        self.assertIn('extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=\n', config)
         self.assertNotIn('attic.monke.fail', netrc + config)
         self.assertNotIn('ts.net', netrc + config)
         self.assertNotIn('fixture-token', config + result.stdout + result.stderr)
@@ -368,7 +375,7 @@ class ReaderEndpoint(unittest.TestCase):
         self.assertEqual(netrc, 'machine icicle.eel-ling.ts.net login ci password fixture-token\n')
         self.assertEqual(mode, '0o600')
         self.assertIn('extra-substituters = http://icicle.eel-ling.ts.net:8080/flakey\n', config)
-        self.assertIn('extra-trusted-public-keys = ' + c.KEY + '\n', config)
+        self.assertIn('extra-trusted-public-keys = flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=\n', config)
         self.assertNotIn('attic.monke.fail', netrc + config)
         self.assertNotIn('172.29', netrc + config)
         self.assertNotIn('fixture-token', config + result.stdout + result.stderr)

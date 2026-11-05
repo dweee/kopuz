@@ -34,3 +34,4 @@ docs/daemon-split-plan.md
 # Python CI helper bytecode
 __pycache__/
 *.py[cod]
+*.pyc

@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True  # see release-channel.py: tracked bytecode dirtied the checkout
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('channel_diagnostics', ROOT / 'ci/release-channel.py')
 channel = importlib.util.module_from_spec(spec)
@@ -46,19 +47,22 @@ def run(*args):
         # Authenticated GitHub API reads avoid the shared anonymous rate limit.
         # The token travels in the environment, never on a command line.
         env = dict(os.environ, NIX_CONFIG=os.environ.get('NIX_CONFIG', '') + '\naccess-tokens = github.com=' + token + '\n')
-    try:
-        result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=3600)
-    except subprocess.TimeoutExpired:
-        raise channel.CommandFailure('command deadline exceeded') from None
-    if result.returncode:
-        diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
-        kind = channel.failure_category(diagnostic)
-        message = kind + ' (exit ' + str(result.returncode) + ')'
-        detail = safe_detail(diagnostic, token)
-        if detail:
-            message += ': ' + detail
-        raise channel.CommandFailure(message)
-    return result.stdout.strip()
+
+    def attempt():
+        try:
+            result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=3600)
+        except subprocess.TimeoutExpired:
+            raise channel.CommandFailure('command deadline exceeded') from None
+        if result.returncode:
+            diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
+            kind = channel.failure_category(diagnostic)
+            message = kind + ' (exit ' + str(result.returncode) + ')'
+            detail = safe_detail(diagnostic, token)
+            if detail:
+                message += ': ' + detail
+            raise channel.CommandFailure(message, kind)
+        return result.stdout.strip()
+    return channel.with_transport_retries(args, attempt)
 
 
 def pin_url(locked):
@@ -115,6 +119,9 @@ def update():
         raise ValueError('Unknown tracking inventory')
     phase('check-clean-checkout')
     if run('git', 'status', '--porcelain', '--untracked-files=no'):
+        names = channel.dirty_tracked_paths()
+        print('Tracked files that differ from the checked-out commit: ' + (', '.join(names) or '(none listed)'),
+              file=sys.stderr, flush=True)
         raise ValueError('Input updates require a clean checkout')
     phase('inspect-locked-inputs')
     lockfile = ROOT / 'flake.lock'

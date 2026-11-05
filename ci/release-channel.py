@@ -548,7 +548,7 @@ def build(system):
         publish_env = dict(os.environ)
         if rules['forge'] == 'github':
             client = run('nix', 'build', '--inputs-from', flake, 'nixpkgs#attic-client', *FLAGS,
-                         '--no-link', '--print-out-paths', env=env)
+                         '--out-link', str(Path(directory) / 'attic-client'), '--print-out-paths', env=env)
             if not STORE.fullmatch(client):
                 raise ValueError('Invalid publisher')
             publish_env.update(ATTIC_BIN=client + '/bin/attic',

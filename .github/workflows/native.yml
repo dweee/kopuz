@@ -199,7 +199,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          client=$(nix build --inputs-from . 'nixpkgs#attic-client' --no-update-lock-file --no-write-lock-file --no-link --print-out-paths --max-jobs 0 --builders "")
+          client=$(nix build --inputs-from . 'nixpkgs#attic-client' --no-update-lock-file --no-write-lock-file --out-link "${RUNNER_TEMP:-/tmp}/attic-client" --print-out-paths --max-jobs 0 --builders "")
           test -x "$client/bin/attic"
           echo "binary=$client/bin/attic" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

@@ -9,6 +9,8 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     outputs:
       revision: ${{ steps.selection.outputs.revision }}
     steps:

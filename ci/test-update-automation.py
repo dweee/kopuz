@@ -188,6 +188,33 @@ class FailureDiagnostics(unittest.TestCase):
         self.assertNotIn(secret, output.getvalue()+error.getvalue())
 
 
+class ApiRetries(unittest.TestCase):
+    rules = {'forge': 'forgejo'}
+
+    def test_get_retries_transport_failures_then_succeeds(self):
+        calls = [TimeoutError('timed out'), HTTPError('u', 503, 'x', None, None), {'ok': True}]
+        def once(*args):
+            value = calls.pop(0)
+            if isinstance(value, Exception): raise value
+            return value
+        with patch.object(a, 'api_once', side_effect=once), patch.object(a.time, 'sleep') as sleep:
+            self.assertEqual(a.api(self.rules, 'GET', '/x'), {'ok': True})
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], list(a.API_RETRY_DELAYS))
+
+    def test_retries_are_bounded(self):
+        with patch.object(a, 'api_once', side_effect=TimeoutError('timed out')) as once, patch.object(a.time, 'sleep'):
+            with self.assertRaises(TimeoutError): a.api(self.rules, 'GET', '/x')
+        self.assertEqual(once.call_count, 1 + len(a.API_RETRY_DELAYS))
+
+    def test_writes_and_client_errors_are_never_retried(self):
+        for method, error in [('POST', TimeoutError('t')), ('PATCH', HTTPError('u', 503, 'x', None, None)),
+                              ('GET', HTTPError('u', 403, 'x', None, None)), ('GET', HTTPError('u', 404, 'x', None, None)),
+                              ('GET', ValueError('API redirect refused'))]:
+            with patch.object(a, 'api_once', side_effect=error) as once, patch.object(a.time, 'sleep'):
+                with self.assertRaises(type(error)): a.api(self.rules, method, '/x')
+            self.assertEqual(once.call_count, 1, (method, error))
+
+
 class ImportFromDerivation(unittest.TestCase):
     def test_instantiation_loads_whole_flake_for_the_builder_system(self):
         with patch.object(u, 'ROOT', Path('/work/repo')):

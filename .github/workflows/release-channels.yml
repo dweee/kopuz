@@ -5,7 +5,7 @@ name: Verified release channels
     branches:
     - flakey
   schedule:
-  - cron: 41 2 * * *
+  - cron: 41 0 * * *
   workflow_dispatch:
     inputs:
       channel:
@@ -27,6 +27,8 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     outputs:
       revision: ${{ steps.selection.outputs.revision }}
     steps:
@@ -76,6 +78,8 @@ jobs:
   build_x86_64_linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     needs:
     - test
     outputs:
@@ -119,6 +123,8 @@ jobs:
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/configure-attic-read.py
+    - name: Install pinned Niks3 publisher
+      run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       env:
@@ -127,9 +133,14 @@ jobs:
     - name: Remove cache reader
       if: ${{ always() }}
       run: python3 ci/configure-attic-read.py --cleanup
+    permissions:
+      contents: read
+      id-token: write
   retain_x86_64_linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/flakey'
       }}
     steps:
@@ -180,6 +191,8 @@ jobs:
   build_aarch64_linux:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     needs:
     - test
     outputs:
@@ -203,7 +216,7 @@ jobs:
           eval-cores = 2
           accept-flake-config = false
           max-jobs = 1
-          cores = 1
+          cores = 0
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
       if: ${{ runner.os == 'macOS' && runner.arch == 'X64' }}
       with:
@@ -213,7 +226,7 @@ jobs:
           experimental-features = nix-command flakes
           accept-flake-config = false
           max-jobs = 1
-          cores = 1
+          cores = 0
     - name: Check Determinate Nix and daemon
       if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
       run: |-
@@ -223,6 +236,8 @@ jobs:
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/configure-attic-read.py
+    - name: Install pinned Niks3 publisher
+      run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       env:
@@ -231,9 +246,14 @@ jobs:
     - name: Remove cache reader
       if: ${{ always() }}
       run: python3 ci/configure-attic-read.py --cleanup
+    permissions:
+      contents: read
+      id-token: write
   retain_aarch64_linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/flakey'
       }}
     steps:
@@ -284,6 +304,8 @@ jobs:
   build_aarch64_darwin:
     runs-on: macos-15
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     needs:
     - test
     outputs:
@@ -327,6 +349,8 @@ jobs:
       env:
         ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/configure-attic-read.py
+    - name: Install pinned Niks3 publisher
+      run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       env:
@@ -335,9 +359,14 @@ jobs:
     - name: Remove cache reader
       if: ${{ always() }}
       run: python3 ci/configure-attic-read.py --cleanup
+    permissions:
+      contents: read
+      id-token: write
   retain_aarch64_darwin:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/flakey'
       }}
     steps:
@@ -388,6 +417,8 @@ jobs:
   promote:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     needs:
     - test
     - build_x86_64_linux

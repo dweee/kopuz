@@ -17,6 +17,9 @@ import sys
 import tempfile
 import time
 
+# Never write bytecode: consumers once tracked ci/__pycache__ and the rewrite
+# dirtied the checkout that the clean-checkout checks require.
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_ATTIC = 'https://attic.monke.fail'
 # The Attic host's address on the Forgejo runner network, reachable only from
@@ -42,10 +45,10 @@ def attic_server(environ=None):
 
 
 try:
-    CACHE = attic_server() + '/flakey'
+    CACHE = ('https://niks3.monke.fail' if json.loads((ROOT/'ci/channels.json').read_text()).get('forge') == 'forgejo' else attic_server() + '/flakey')
 except ValueError as error:
     sys.exit('Release channel gate failed during startup: ' + str(error) + '.')
-KEY = 'flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8='
+KEY = ('niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=' if CACHE == 'https://niks3.monke.fail' else 'flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=')
 UPSTREAM = 'https://cache.nixos.org'
 UPSTREAM_KEY = 'cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
 STORE = re.compile(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+')
@@ -68,6 +71,10 @@ def phase(label):
 class CommandFailure(RuntimeError):
     """A fixed diagnostic category, never raw subprocess output or arguments."""
 
+    def __init__(self, message, category=None):
+        super().__init__(message)
+        self.category = category
+
 
 def failure_category(diagnostic):
     patterns = [
@@ -77,7 +84,10 @@ def failure_category(diagnostic):
         ('cache-missing-output', r'incomplete cache publication|required cache output is missing'),
         ('cache-signature', r'lacks a signature|is not signed|invalid signature|no trusted signature'),
         ('authorization', r'HTTP[^\n]*(?:401|403)|unauthorized|forbidden|authentication failed'),
-        ('transport', r'unexpected eof|http/2|framing|connection reset|timed out|timeout|internalservererror|HTTP[^\n]*50[0-9]'),
+        ('daemon-unavailable', r"remote store 'daemon'|cannot connect to socket|daemon-socket"),
+        ('transport', r'unexpected eof|http/2|framing|connection reset|timed out|timeout|internalservererror|HTTP[^\n]*50[0-9]|'
+                      r'could not resolve host|resolving timed out|temporary failure in name resolution|connection refused|'
+                      r'couldn.t connect|failed to connect|ssl connect error|partial file|transfer closed'),
         ('missing-input-or-output', r'HTTP[^\n]*404|does not exist|no such file'),
         ('evaluation', r'evaluation aborted|attribute[^\n]*missing|syntax error|infinite recursion|assertion'),
         ('build', r'builder for[^\n]*failed|ninja[^\n]*stopped|failed with exit code'),
@@ -95,44 +105,96 @@ def safe_detail(diagnostic):
     return text[:300]
 
 
-RETRY_ATTEMPTS = 3
-RETRY_DELAY = 20
-# Read-only Nix commands that only fetch metadata or sources. Builds are never retried.
-RETRYABLE = {'eval', 'path-info', 'copy', 'store'}
+# Only transport-class failures of idempotent `nix` commands are retried. Hash,
+# signature, authorization, evaluation and build failures are never retried.
+TRANSPORT_RETRY_DELAYS = (20, 60, 120)
+RETRYABLE = {'transport', 'daemon-unavailable'}
+# Read-only commands that only fetch metadata or sources may retry any transport
+# failure. For every other `nix` command (builds) only a daemon that could not be
+# reached is retried: that failed before any work was done.
+READ_ONLY = {'eval', 'path-info', 'copy', 'store'}
+DAEMON_SOCKET = Path('/nix/var/nix/daemon-socket/socket')
 
 
-def retryable_failure(args, diagnostic):
-    """Transient network or substitution failures of read-only Nix commands.
-
-    Evaluation runs with builds disabled, so "Cannot build" there means a
-    source or substitute could not be fetched, not a genuine build failure.
-    """
-    if len(args) < 2 or args[0] != 'nix' or args[1] not in RETRYABLE:
+def daemon_healthy():
+    try:
+        return subprocess.run(['nix', 'store', 'info', '--store', 'daemon', '--json'], cwd=ROOT, text=True,
+                              capture_output=True, timeout=90).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
         return False
-    if failure_category(diagnostic) == 'transport':
-        return True
-    return args[1] == 'eval' and bool(re.search(r"cannot build '", diagnostic, re.I))
+
+
+def ensure_daemon():
+    """Verify the job's isolated Nix daemon; restart it once or fail with a clear category."""
+    if os.environ.get('NIX_REMOTE') != 'daemon' or daemon_healthy():
+        return
+    print('Isolated Nix daemon is unhealthy; restarting it', file=sys.stderr, flush=True)
+    log = open('/tmp/nix-daemon.log', 'ab')
+    env = {k: v for k, v in os.environ.items() if k != 'NIX_REMOTE'}
+    try:
+        child = subprocess.Popen(['nix-daemon'], stdout=log, stderr=log, env=env, start_new_session=True)
+    except OSError:
+        raise CommandFailure('daemon-unavailable: nix-daemon could not be started', 'daemon-unavailable') from None
+    for _ in range(30):
+        if DAEMON_SOCKET.exists() and child.poll() is None:
+            break
+        time.sleep(1)
+    if child.poll() is None and daemon_healthy():
+        print('Isolated Nix daemon restarted', file=sys.stderr, flush=True)
+        return
+    raise CommandFailure('daemon-unavailable: the isolated Nix daemon is down and could not be restarted '
+                         '(see /tmp/nix-daemon.log on the runner)', 'daemon-unavailable')
+
+
+def with_transport_retries(args, attempt, sleep=None):
+    """Call attempt() again after transport-class failures of `nix` commands."""
+    is_nix = bool(args) and Path(str(args[0])).name == 'nix'
+    retryable = RETRYABLE if is_nix and len(args) > 1 and args[1] in READ_ONLY else {'daemon-unavailable'}
+    delays = iter(TRANSPORT_RETRY_DELAYS if is_nix else ())
+    while True:
+        try:
+            return attempt()
+        except CommandFailure as error:
+            delay = next(delays, None)
+            if delay is None or error.category not in retryable:
+                raise
+            print('Retrying after ' + error.category + ' failure in ' + str(delay) + 's', file=sys.stderr, flush=True)
+            (sleep or time.sleep)(delay)
+            ensure_daemon()
 
 
 def run(*args, env=None):
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
+    def attempt():
         try:
             result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
         except subprocess.TimeoutExpired:
             raise CommandFailure('command deadline exceeded') from None
-        if not result.returncode:
-            return result.stdout.strip()
-        # Nix diagnostics may contain private paths or authenticated URLs. Emit
-        # the classification, the status and a redacted tail of Nix error lines.
-        diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
-        if attempt < RETRY_ATTEMPTS and retryable_failure(args, diagnostic):
-            print('Retrying transient ' + failure_category(diagnostic) + ' failure of nix '
-                  + args[1] + ' (attempt ' + str(attempt) + ' of ' + str(RETRY_ATTEMPTS) + ')', flush=True)
-            time.sleep(RETRY_DELAY * attempt)
-            continue
-        message = failure_category(diagnostic) + ' (exit ' + str(result.returncode) + ')'
-        detail = safe_detail(diagnostic)
-        raise CommandFailure(message + (': ' + detail if detail else ''))
+        if result.returncode:
+            # Nix diagnostics may contain private paths or authenticated URLs. Emit
+            # the classification, the status and a redacted tail of Nix error lines.
+            diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
+            category = failure_category(diagnostic)
+            # Evaluation runs with builds disabled, so "Cannot build" there means a
+            # source or substitute could not be fetched, not a genuine build failure.
+            if (len(args) > 1 and args[1] == 'eval' and category in {'command-failed', 'build'}
+                    and re.search(r"cannot build '", diagnostic, re.I)):
+                category = 'transport'
+            message = category + ' (exit ' + str(result.returncode) + ')'
+            detail = safe_detail(diagnostic)
+            raise CommandFailure(message + (': ' + detail if detail else ''), category)
+        return result.stdout.strip()
+    return with_transport_retries(args, attempt)
+
+
+def dirty_tracked_paths(limit=20):
+    """Names (never contents) of tracked files that differ from HEAD."""
+    try:
+        result = subprocess.run(['git', 'status', '--porcelain', '-z', '--untracked-files=no'], cwd=ROOT, text=True,
+                                capture_output=True, timeout=300)
+    except (subprocess.SubprocessError, OSError):
+        return []
+    names = [entry[3:] for entry in result.stdout.split('\0') if len(entry) > 3]
+    return names[:limit] + (['... and ' + str(len(names) - limit) + ' more'] if len(names) > limit else [])
 
 
 def digest(value):
@@ -451,6 +513,8 @@ def retain(system):
 def source():
     sha = run('git', 'rev-parse', 'HEAD')
     if not SHA.fullmatch(sha) or run('git', 'status', '--porcelain', '--untracked-files=no'):
+        print('Tracked files that differ from the release commit: ' + (', '.join(dirty_tracked_paths()) or '(none listed)'),
+              file=sys.stderr)
         raise ValueError('Release source changed')
     return sha
 
@@ -462,7 +526,7 @@ def build(system):
     sha = source()
     # Writer/forge tokens never enter Nix evaluation or package build processes.
     env = {k: v for k, v in os.environ.items()
-           if k not in {'ATTIC_TOKEN', 'CHANNEL_TOKEN', 'SOURCE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'}}
+           if k not in {'ATTIC_TOKEN', 'CHANNEL_TOKEN', 'SOURCE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'NIKS3_WRITE_TOKEN', 'NIKS3_AUTH_TOKEN_FILE', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL'}}
     phase('check-native-platform')
     if run('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem', env=env) != system:
         raise ValueError('Native builder required')
@@ -481,12 +545,14 @@ def build(system):
     expected = {}
     with tempfile.TemporaryDirectory(prefix='channel-outputs-') as directory:
         phase('prepare-cache-publisher')
-        client = run('nix', 'build', '--inputs-from', flake, 'nixpkgs#attic-client', *FLAGS,
-                     '--no-link', '--print-out-paths', env=env)
-        if not STORE.fullmatch(client):
-            raise ValueError('Invalid publisher')
-        publish_env = dict(os.environ, ATTIC_BIN=client + '/bin/attic',
-                           ATTIC_ENDPOINT='https://attic.monke.fail', ATTIC_CACHE='flakey')
+        publish_env = dict(os.environ)
+        if rules['forge'] == 'github':
+            client = run('nix', 'build', '--inputs-from', flake, 'nixpkgs#attic-client', *FLAGS,
+                         '--no-link', '--print-out-paths', env=env)
+            if not STORE.fullmatch(client):
+                raise ValueError('Invalid publisher')
+            publish_env.update(ATTIC_BIN=client + '/bin/attic',
+                               ATTIC_ENDPOINT='https://attic.monke.fail', ATTIC_CACHE='flakey')
         outputs = Path(directory) / 'outputs.txt'
         for index, target in enumerate(targets, 1):
             print(f'Processing inventory target {index}/{len(targets)}', flush=True)
@@ -520,7 +586,9 @@ def build(system):
             # inventory, checks and independent cache verification below.
             outputs.write_text('\n'.join(paths) + '\n')
             phase('upload-target-closure')
-            run(sys.executable, str(ROOT / 'ci/push-attic.py'), '--outputs', str(outputs), env=publish_env)
+            if rules['forge'] == 'github':
+                run(sys.executable, str(ROOT / 'ci/push-attic.py'), '--outputs', str(outputs), env=publish_env)
+            run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs), env=publish_env)
             roots.extend(paths)
             print(f'Built and cached inventory target {index}/{len(targets)}', flush=True)
         # All native flake checks are required, even when the package job would
@@ -601,18 +669,22 @@ def promote(channel, revision, proofs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['build', 'promote', 'policy', 'retain'])
+    parser.add_argument('action', choices=['build', 'promote', 'policy', 'retain', 'daemon'])
     parser.add_argument('--system')
     parser.add_argument('--channel', choices=['tested', 'stable'], default='tested')
     parser.add_argument('--revision')
     parser.add_argument('--proofs', default='{}')
     args = parser.parse_args()
     try:
-        if args.action == 'build':
+        if args.action == 'daemon':
+            ensure_daemon()
+        elif args.action == 'build':
+            ensure_daemon()
             build(args.system)
         elif args.action == 'promote':
             promote(args.channel, args.revision, json.loads(args.proofs))
         elif args.action == 'retain':
+            ensure_daemon()
             retain(args.system)
         else:
             print(json.dumps(policy(), sort_keys=True))

@@ -57,6 +57,7 @@ jobs:
         run: |
           nix develop --no-update-lock-file --no-write-lock-file --command bash -euc '
             gitleaks git --redact --no-banner --log-opts=552400339461ef09c09d4db133bf356ea8fead18..HEAD .
+            python3 ci/test-gitleaks-config.py
             cargo fmt --all -- --check
             cargo clippy --workspace --all-targets -- -D warnings
             rm -rf target/debug

@@ -10,3 +10,13 @@ regexes = [
   '''^(?:flakey:)?mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=?$''',
   '''^(?:niks3\.monke\.fail-1:)?q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=?$'''
 ]
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Reviewed helper SHA-256 digests, not credential values"
+condition = "AND"
+paths = ['''(^|/)ci/channel-tool-hashes\.json$''']
+regexTarget = "secret"
+regexes = ['''^[0-9a-f]{64}$''']

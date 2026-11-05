@@ -46,6 +46,7 @@ class Gates(unittest.TestCase):
         self.assertNotIn('fixture-secret', str(raised.exception))
         self.assertNotIn('/nix/store', str(raised.exception))
 
+    @patch.dict(os.environ, {"NIX_REMOTE": ""})
     def test_read_only_nix_commands_retry_transient_failures_only(self):
         bad = subprocess.CompletedProcess(['nix'], 1, stdout='', stderr='error: HTTP/2 framing error')
         good = subprocess.CompletedProcess(['nix'], 0, stdout='ok\n', stderr='')

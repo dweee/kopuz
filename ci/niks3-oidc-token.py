@@ -9,19 +9,23 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
-def token():
-    if os.environ.get('GITHUB_SERVER_URL') != 'https://github.com' or os.environ.get('GITHUB_EVENT_NAME') not in {'push','workflow_dispatch','schedule'}:
+def token(audience='https://niks3.monke.fail'):
+    if audience not in {'https://niks3.monke.fail', 'https://niks3.monke.fail/read'}:
+        raise ValueError('Unexpected token audience')
+    if os.environ.get('GITHUB_SERVER_URL') != 'https://github.com' or os.environ.get('GITHUB_EVENT_NAME') not in {'push','workflow_dispatch','schedule','repository_dispatch'}:
         raise ValueError('Untrusted event')
     url=urlsplit(os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'])
     if url.scheme != 'https' or not url.hostname or not url.hostname.endswith('.actions.githubusercontent.com') or url.username or url.password:
         raise ValueError('Unexpected token service')
-    query=dict(parse_qsl(url.query)); query['audience']='https://niks3.monke.fail'
+    query=dict(parse_qsl(url.query)); query['audience']=audience
     request=Request(urlunsplit(url._replace(query=urlencode(query))), headers={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
     with urlopen(request, timeout=30) as response:
         value=json.load(response)['value']
     if not isinstance(value,str) or len(value)>32768 or len(value.split('.'))!=3 or any(c.isspace() for c in value):
         raise ValueError('Invalid OIDC response')
     claims=json.loads(base64.urlsafe_b64decode(value.split('.')[1]+'='*(-len(value.split('.')[1])%4)))
+    if not isinstance(claims.get('exp'), (int, float)) or claims['exp'] <= datetime.now(timezone.utc).timestamp()+30:
+        raise ValueError('OIDC token expired or expires too soon')
     expires=datetime.fromtimestamp(claims['exp'],timezone.utc).isoformat().replace('+00:00','Z')
     return {'token':value,'expires_at':expires}
 

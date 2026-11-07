@@ -68,6 +68,7 @@ jobs:
     - name: Regression tests and complete inventory policy
       run: |-
         python3 ci/test-release-channel.py
+        python3 ci/test-push-niks3.py
         python3 ci/test-update-automation.py
         python3 ci/release-channel.py policy
     - name: Select immutable revision
@@ -120,19 +121,15 @@ jobs:
         nix --version | grep -F 'Determinate Nix 3.24.1'
         nix store info --store daemon --json
     - name: Configure job-local private cache reader
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
-      run: python3 ci/configure-attic-read.py
+      run: python3 ci/configure-niks3.py --oidc
     - name: Install pinned Niks3 publisher
       run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/release-channel.py build --system x86_64-linux
     - name: Remove cache reader
       if: ${{ always() }}
-      run: python3 ci/configure-attic-read.py --cleanup
+      run: python3 ci/configure-niks3.py --cleanup
     permissions:
       contents: read
       id-token: write
@@ -178,16 +175,17 @@ jobs:
         nix --version | grep -F 'Determinate Nix 3.24.1'
         nix store info --store daemon --json
     - name: Configure job-local private reader
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
-      run: python3 ci/configure-attic-read.py
+      run: python3 ci/configure-niks3.py --oidc
     - name: Verify advertised/recent releases independently of current builds
       env:
         SOURCE_TOKEN: ${{ github.token }}
       run: python3 ci/release-channel.py retain --system x86_64-linux
     - name: Remove private reader
       if: ${{ always() }}
-      run: python3 ci/configure-attic-read.py --cleanup
+      run: python3 ci/configure-niks3.py --cleanup
+    permissions:
+      contents: read
+      id-token: write
   build_aarch64_linux:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
@@ -233,19 +231,15 @@ jobs:
         nix --version | grep -F 'Determinate Nix 3.24.1'
         nix store info --store daemon --json
     - name: Configure job-local private cache reader
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
-      run: python3 ci/configure-attic-read.py
+      run: python3 ci/configure-niks3.py --oidc
     - name: Install pinned Niks3 publisher
       run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/release-channel.py build --system aarch64-linux
     - name: Remove cache reader
       if: ${{ always() }}
-      run: python3 ci/configure-attic-read.py --cleanup
+      run: python3 ci/configure-niks3.py --cleanup
     permissions:
       contents: read
       id-token: write
@@ -291,16 +285,17 @@ jobs:
         nix --version | grep -F 'Determinate Nix 3.24.1'
         nix store info --store daemon --json
     - name: Configure job-local private reader
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
-      run: python3 ci/configure-attic-read.py
+      run: python3 ci/configure-niks3.py --oidc
     - name: Verify advertised/recent releases independently of current builds
       env:
         SOURCE_TOKEN: ${{ github.token }}
       run: python3 ci/release-channel.py retain --system aarch64-linux
     - name: Remove private reader
       if: ${{ always() }}
-      run: python3 ci/configure-attic-read.py --cleanup
+      run: python3 ci/configure-niks3.py --cleanup
+    permissions:
+      contents: read
+      id-token: write
   build_aarch64_darwin:
     runs-on: macos-15
     timeout-minutes: 360
@@ -346,19 +341,15 @@ jobs:
         nix --version | grep -F 'Determinate Nix 3.24.1'
         nix store info --store daemon --json
     - name: Configure job-local private cache reader
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
-      run: python3 ci/configure-attic-read.py
+      run: python3 ci/configure-niks3.py --oidc
     - name: Install pinned Niks3 publisher
       run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: python3 ci/release-channel.py build --system aarch64-darwin
     - name: Remove cache reader
       if: ${{ always() }}
-      run: python3 ci/configure-attic-read.py --cleanup
+      run: python3 ci/configure-niks3.py --cleanup
     permissions:
       contents: read
       id-token: write
@@ -404,16 +395,17 @@ jobs:
         nix --version | grep -F 'Determinate Nix 3.24.1'
         nix store info --store daemon --json
     - name: Configure job-local private reader
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
-      run: python3 ci/configure-attic-read.py
+      run: python3 ci/configure-niks3.py --oidc
     - name: Verify advertised/recent releases independently of current builds
       env:
         SOURCE_TOKEN: ${{ github.token }}
       run: python3 ci/release-channel.py retain --system aarch64-darwin
     - name: Remove private reader
       if: ${{ always() }}
-      run: python3 ci/configure-attic-read.py --cleanup
+      run: python3 ci/configure-niks3.py --cleanup
+    permissions:
+      contents: read
+      id-token: write
   promote:
     runs-on: ubuntu-24.04
     timeout-minutes: 360

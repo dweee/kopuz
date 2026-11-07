@@ -10,5 +10,9 @@
   "push-niks3.py": "b97bbcb63a5d305a4062196e1f52b0912b1a88e735731407bbcbaab39a8b466b",
   "test-push-niks3.py": "a94920042ed3eb03f2a6d970f494de93237658632d7712227e60cfc89492aec2",
   "niks3-oidc-token.py": "58569dc6c6d05232300aae7d03848c66f8678f832d51a1a5326f034da41b2e5f",
-  "install-niks3.sh": "08f799108b9e5f6927230ae91d8a555f68ab2b8aeb6b1abdd75345f72fbbbf25"
+  "install-niks3.sh": "08f799108b9e5f6927230ae91d8a555f68ab2b8aeb6b1abdd75345f72fbbbf25",
+  "retain-build-outputs.py": "0c7ecebc19c6ac7c3bac2e53ad486e3057c449f15e64d830e51a4d39dd810f54",
+  "test-retain-build-outputs.py": "37782df3054a422faed7b7275f4bbed6dee986d4a8583cd1df7aacb696db1f5e",
+  "transfer-attic.py": "1481ac7791556734421a9f5b9d614a9d9b76c9ef26e0bf274f2dc2bce6391f67",
+  "test-transfer-attic.py": "c54bac1a962882c499a02a92a1a3ed3b97674b18fabed47cfe8c0361da6ca136"
 }

@@ -130,6 +130,10 @@ jobs:
         TARGET_PACKAGE: ${{ matrix.package }}
       run: |
         set -euo pipefail
+        target=$(python3 ci/native-target.py package)
+        check=$(python3 ci/native-target.py check)
+        cat > "$RUNNER_TEMP/native-cache-build.sh" <<'FLAKEY_CACHE_BUILD'
+        set -euo pipefail
         test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$TARGET_SYSTEM"
         target=$(python3 ci/native-target.py package)
         check=$(python3 ci/native-target.py check)
@@ -144,6 +148,8 @@ jobs:
           echo "Package build: ${SECONDS}s"
           cat outputs.txt
         } >> "$GITHUB_STEP_SUMMARY"
+        FLAKEY_CACHE_BUILD
+        python3 ci/retain-build-outputs.py --target "$target" --target "$check" --manifest cache-outputs.txt --script "$RUNNER_TEMP/native-cache-build.sh"
     - name: Remove job-local Niks3 reader before exporting build data
       if: ${{ always() }}
       run: python3 ci/configure-niks3.py --cleanup
@@ -151,7 +157,9 @@ jobs:
       timeout-minutes: 15
       env:
         ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '4096' }}
-      run: python3 ci/transfer-attic.py export --directory attic-transfer
+      run: python3 ci/transfer-attic.py export --directory attic-transfer --manifest cache-outputs.txt
+      id: cache_transfer
+      if: ${{ always() && !cancelled() && hashFiles('cache-outputs.txt') != '' }}
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: nix-${{ matrix.system }}-${{ matrix.package }}-${{ github.sha }}
@@ -160,6 +168,7 @@ jobs:
         compression-level: 0
         if-no-files-found: error
         overwrite: false
+      if: ${{ always() && !cancelled() && steps.cache_transfer.outcome == 'success' }}
     permissions:
       contents: read
       id-token: write
@@ -168,7 +177,7 @@ jobs:
       contents: read
       id-token: write
     needs: build
-    if: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (vars.NIKS3_PUSH_ENABLED || vars.ATTIC_PUSH_ENABLED) == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    if: ${{ always() && !cancelled() && ((needs.build.result == 'success' || needs.build.result == 'failure') && (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (vars.NIKS3_PUSH_ENABLED || vars.ATTIC_PUSH_ENABLED) == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     name: Publish ${{ matrix.package }} (${{ matrix.system }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45

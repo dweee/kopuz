@@ -25,7 +25,7 @@ def roots(manifest):
     if manifest.stat().st_size > 1024 * 1024:
         raise ValueError("Output manifest is too large")
     paths = list(dict.fromkeys(manifest.read_text().splitlines()))
-    if not paths or len(paths) > 1024 or any(not re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/\s]+", p)
+    if not paths or len(paths) > 8192 or any(not re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/\s]+", p)
                                            or p.endswith(".drv") for p in paths):
         raise ValueError("Invalid output manifest")
     return paths
@@ -75,7 +75,7 @@ def transfer(mode, directory, limit, source_manifest=None):
     else:
         paths = roots(manifest)
         # Import NAR data only. Existing trusted client paths were installed from
-        # cache.nixos.org before this step and cannot be replaced by this import.
+        # trusted substituters before this step and cannot be replaced by this import.
         process = subprocess.Popen(["nix-store", "--import", "--option", "require-sigs", "false"],
                                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
         try:

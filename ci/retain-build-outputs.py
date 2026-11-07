@@ -54,14 +54,17 @@ class Collector:
             return
         # Keep the transfer's manifest and byte bounds, and guard all runtime
         # dependencies before an artifact can exist. Never inventory the store.
-        if len(paths) > 1024:
+        # Large Rust applications can build more than 1,024 selected outputs.
+        # Match the transfer parser's bounded root count and manifest size.
+        contents = '\n'.join(paths) + '\n'
+        if len(paths) > 8192 or len(contents.encode()) > 1024 * 1024:
             raise ValueError('Completed build manifest exceeds transfer limit')
         with channel.build_environment(self.env):
             public.runtime(paths)
         self.manifest.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode='w', dir=self.manifest.parent, delete=False) as stream:
             temporary = Path(stream.name)
-            stream.write('\n'.join(paths) + '\n')
+            stream.write(contents)
         try:
             os.replace(temporary, self.manifest)
         finally:

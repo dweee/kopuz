@@ -218,6 +218,8 @@ jobs:
       with:
         name: nix-${{ matrix.system }}-${{ matrix.package }}-${{ github.sha }}
         path: attic-transfer
+    - name: Read Niks3 before installing the pinned publisher
+      run: python3 ci/configure-niks3.py --oidc
     - name: Install pinned Niks3 publisher
       run: bash ci/install-niks3.sh
     - name: Import data without running any package programs
@@ -227,3 +229,6 @@ jobs:
       run: python3 ci/transfer-attic.py import --directory attic-transfer
     - name: Publish to Niks3 with GitHub OIDC and verify S3 integrity
       run: python3 ci/push-niks3.py --outputs attic-transfer/outputs.txt
+    - name: Remove job-local Niks3 reader
+      if: ${{ always() }}
+      run: python3 ci/configure-niks3.py --cleanup

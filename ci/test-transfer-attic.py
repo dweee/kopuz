@@ -67,6 +67,19 @@ class TransferSafetyTests(unittest.TestCase):
             manifest.write_text(value+'\n'+value+'\n')
             self.assertEqual(module.roots(manifest), [value])
 
+    def test_large_selected_graph_keeps_count_and_byte_bounds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / 'outputs.txt'
+            for count, suffix, allowed in [(1123, 'dependency', True), (8192, 'dependency', True),
+                                           (8193, 'dependency', False), (1123, 'x'*1000, False)]:
+                paths = ['/nix/store/'+'a'*32+'-'+str(i)+'-'+suffix for i in range(count)]
+                manifest.write_text('\n'.join(paths)+'\n')
+                with self.subTest(count=count, allowed=allowed):
+                    if allowed:
+                        self.assertEqual(module.roots(manifest), paths)
+                    else:
+                        with self.assertRaises(ValueError):module.roots(manifest)
+
     def test_import_restores_official_signatures_before_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

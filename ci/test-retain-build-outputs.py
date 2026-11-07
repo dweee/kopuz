@@ -70,6 +70,26 @@ class Retention(unittest.TestCase):
             self.assertEqual(manifest.read_text(),A+'\n'+B+'\n')
             runtime.assert_called_once_with([A,B])
 
+    def test_large_selected_graph_survives_but_manifest_bounds_remain(self):
+        for count, suffix, allowed in [(1123, 'dependency', True), (8192, 'dependency', True),
+                                       (8193, 'dependency', False), (1123, 'x'*1000, False)]:
+            paths = ['/nix/store/'+'a'*32+'-'+str(i)+'-'+suffix for i in range(count)]
+            with self.subTest(count=count, allowed=allowed), tempfile.TemporaryDirectory() as temporary:
+                manifest=Path(temporary)/'outputs'
+                with patch.object(retention.public,'derivation'), \
+                        patch.object(retention.channel,'derivation_output_paths',return_value=set(paths)), \
+                        patch.object(retention.channel,'completed_build_outputs',return_value=paths), \
+                        patch.object(retention.public,'runtime') as runtime:
+                    collector=retention.Collector(['.#sample'],manifest,{})
+                    if allowed:
+                        collector.retain()
+                        self.assertEqual(manifest.read_text().splitlines(), sorted(paths))
+                        runtime.assert_called_once_with(sorted(paths))
+                    else:
+                        with self.assertRaises(ValueError):collector.retain()
+                        runtime.assert_not_called()
+                        self.assertFalse(manifest.exists())
+
     def test_nonselected_roots_and_denied_closures_cannot_be_exported(self):
         for roots in [[C],[A]]:
             with self.subTest(roots=roots),tempfile.TemporaryDirectory() as temporary:

@@ -33,6 +33,30 @@ def failure_category(diagnostic):
     return 'publisher-rejected', False
 
 
+def store_output_path(value):
+    """Follow CI result aliases, stopping before a store output's own symlink."""
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    for _ in range(64):
+        # Resolving this leaf would replace a symlink output's NAR identity
+        # with its target. Resolve only outer aliases and their parents.
+        if re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+', str(path)):
+            if str(path).endswith('.drv'):
+                break
+            return str(path)
+        if Path('/nix/store') == path or Path('/nix/store') in path.parents:
+            break
+        path = path.parent.resolve() / path.name
+        if Path('/nix/store') in path.parents:
+            continue
+        if not path.is_symlink():
+            break
+        target = path.readlink()
+        path = target if target.is_absolute() else path.parent / target
+    raise ValueError('Expected built output paths')
+
+
 def publish(outputs):
     binary=Path(os.environ['NIKS3_BIN'])
     if not binary.is_absolute() or not binary.is_file() or not os.access(binary,os.X_OK):
@@ -40,7 +64,7 @@ def publish(outputs):
     server=os.environ.get('NIKS3_SERVER','https://niks3.monke.fail')
     if server!='https://niks3.monke.fail':
         raise ValueError('Unexpected destination')
-    paths=list(dict.fromkeys(str(Path(p).resolve()) for p in outputs.read_text().splitlines()))
+    paths=list(dict.fromkeys(store_output_path(p) for p in outputs.read_text().splitlines()))
     if not paths or any(not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+',p)
                         or p.endswith('.drv') for p in paths):
         raise ValueError('Expected built output paths')

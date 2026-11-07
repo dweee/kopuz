@@ -527,6 +527,24 @@ def native_build_ready(rules, system, env):
         raise ValueError('Native Darwin build readiness gate rejected new work')
 
 
+def native_platform_ready(rules, system, env):
+    actual = run('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem', env=env)
+    if actual == system:
+        return
+    # A private ARM Mac runner may explicitly advertise its verified Rosetta
+    # capability. Do not generalize this to arbitrary cross-platform builders.
+    if (rules.get('forge') != 'forgejo' or actual != 'aarch64-darwin'
+            or system != 'x86_64-darwin'
+            or system not in env.get('NATIVE_BUILD_COMPATIBLE_SYSTEMS', '').split()):
+        raise ValueError('Native builder required')
+    native_build_ready(rules, system, env)
+    settings = json.loads(run('nix', 'config', 'show', '--json', env=env))
+    platforms = settings.get('extra-platforms', {}).get('value', [])
+    if not isinstance(platforms, list) or system not in platforms:
+        raise ValueError('Intel Darwin compatibility is not configured in Nix')
+    run('/usr/bin/arch', '-x86_64', '/usr/bin/true', env=env)
+
+
 def build(system):
     rules = policy()
     if rules.get('kind') == 'fleet':
@@ -536,8 +554,7 @@ def build(system):
     env = {k: v for k, v in os.environ.items()
            if k not in {'ATTIC_TOKEN', 'CHANNEL_TOKEN', 'SOURCE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'NIKS3_WRITE_TOKEN', 'NIKS3_AUTH_TOKEN_FILE', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL'}}
     phase('check-native-platform')
-    if run('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem', env=env) != system:
-        raise ValueError('Native builder required')
+    native_platform_ready(rules, system, env)
     targets = rules['targets'][system]
     # Preserve Git self.rev/lastModified, and exclude checkout submodules and
     # untracked CI files just as the consuming git flake does.
@@ -599,7 +616,15 @@ def build(system):
             native_build_ready(rules, system, env)
             if not re.fullmatch(r'[\w+-]+', name):
                 raise ValueError('Invalid check name')
-            run('nix', 'build', flake + '#checks.' + system + '.' + name, *FLAGS, '--no-link', env=env)
+            check_paths = run('nix', 'build', flake + '#checks.' + system + '.' + name + '^*',
+                              *FLAGS, '--no-link', '--print-out-paths', env=env).splitlines()
+            if not check_paths or any(not STORE.fullmatch(p) or p.endswith('.drv') for p in check_paths):
+                raise ValueError('Missing native check outputs')
+            # Checks can be expensive build-only outputs. Cache each completed
+            # check even if a later check or release verification fails.
+            outputs.write_text('\n'.join(check_paths) + '\n')
+            phase('upload-check-closure')
+            run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs), env=publish_env)
         roots = sorted(set(roots))
         phase('inspect-built-closure')
         if not roots or not expected or not set(roots) <= set(expected):

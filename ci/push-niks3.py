@@ -57,7 +57,7 @@ def publish(outputs):
         if os.environ.get('GITHUB_SERVER_URL') == 'https://github.com':
             if token or token_file or os.environ.get('NIKS3_READ_NETRC') or (os.environ.get('NIKS3_NETRC_FILE') and os.environ.get('NIKS3_READ_AUTH') != 'github-oidc'):
                 raise ValueError('GitHub requires OIDC without private credentials')
-            if os.environ.get('GITHUB_EVENT_NAME') not in {'push','workflow_dispatch','schedule'}:
+            if os.environ.get('GITHUB_EVENT_NAME') not in {'push','workflow_dispatch','schedule','repository_dispatch'}:
                 raise ValueError('Untrusted publication event')
             auth=['--auth-token-script', str(Path(__file__).with_name('niks3-oidc-token.py'))]
         else:

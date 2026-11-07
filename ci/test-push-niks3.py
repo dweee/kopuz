@@ -65,6 +65,14 @@ class Publication(unittest.TestCase):
         ]:
             self.assertEqual(publisher.failure_category(message), (category, retry))
 
+    def test_repository_dispatch_uses_oidc_publisher_without_static_secret(self):
+        env = {k: v for k, v in self.env.items() if k != 'NIKS3_WRITE_TOKEN'}
+        env.update(GITHUB_SERVER_URL='https://github.com', GITHUB_EVENT_NAME='repository_dispatch')
+        with patch.dict(os.environ, env, clear=True), patch.object(publisher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as call:
+            publisher.publish(self.manifest)
+        self.assertIn('--auth-token-script', call.call_args.args[0])
+        self.assertNotIn('--auth-token-path', call.call_args.args[0])
+
     def test_missing_optional_summary_does_not_relabel_success(self):
         env=self.env|{'GITHUB_STEP_SUMMARY':str(self.root/'absent/summary')}
         with patch.dict(os.environ,env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')):

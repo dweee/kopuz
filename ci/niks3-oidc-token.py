@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 def token(audience='https://niks3.monke.fail'):
     if audience not in {'https://niks3.monke.fail', 'https://niks3.monke.fail/read'}:
         raise ValueError('Unexpected token audience')
-    if os.environ.get('GITHUB_SERVER_URL') != 'https://github.com' or os.environ.get('GITHUB_EVENT_NAME') not in {'push','workflow_dispatch','schedule'}:
+    if os.environ.get('GITHUB_SERVER_URL') != 'https://github.com' or os.environ.get('GITHUB_EVENT_NAME') not in {'push','workflow_dispatch','schedule','repository_dispatch'}:
         raise ValueError('Untrusted event')
     url=urlsplit(os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'])
     if url.scheme != 'https' or not url.hostname or not url.hostname.endswith('.actions.githubusercontent.com') or url.username or url.password:

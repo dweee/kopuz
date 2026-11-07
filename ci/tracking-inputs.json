@@ -3,6 +3,9 @@
   "inputs": {
     "nixpkgs": {
       "source": "github:NixOS/nixpkgs"
+    },
+    "crane": {
+      "source": "github:ipetkov/crane"
     }
   }
 }

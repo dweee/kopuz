@@ -122,8 +122,10 @@ jobs:
         nix store info --store daemon --json
     - name: Configure job-local private cache reader
       run: python3 ci/configure-niks3.py --oidc
-    - name: Install pinned Niks3 publisher
-      run: bash ci/install-niks3.sh
+    - name: Install pinned Niks3 publisher and retain its build dependencies
+      run: bash ci/install-niks3.sh --retain-bootstrap
+    - name: Publish bootstrap client and completed build dependencies
+      run: python3 ci/push-niks3.py --outputs niks3-bootstrap-outputs.txt
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       run: python3 ci/release-channel.py build --system x86_64-linux
@@ -232,8 +234,10 @@ jobs:
         nix store info --store daemon --json
     - name: Configure job-local private cache reader
       run: python3 ci/configure-niks3.py --oidc
-    - name: Install pinned Niks3 publisher
-      run: bash ci/install-niks3.sh
+    - name: Install pinned Niks3 publisher and retain its build dependencies
+      run: bash ci/install-niks3.sh --retain-bootstrap
+    - name: Publish bootstrap client and completed build dependencies
+      run: python3 ci/push-niks3.py --outputs niks3-bootstrap-outputs.txt
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       run: python3 ci/release-channel.py build --system aarch64-linux
@@ -342,8 +346,10 @@ jobs:
         nix store info --store daemon --json
     - name: Configure job-local private cache reader
       run: python3 ci/configure-niks3.py --oidc
-    - name: Install pinned Niks3 publisher
-      run: bash ci/install-niks3.sh
+    - name: Install pinned Niks3 publisher and retain its build dependencies
+      run: bash ci/install-niks3.sh --retain-bootstrap
+    - name: Publish bootstrap client and completed build dependencies
+      run: python3 ci/push-niks3.py --outputs niks3-bootstrap-outputs.txt
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       run: python3 ci/release-channel.py build --system aarch64-darwin

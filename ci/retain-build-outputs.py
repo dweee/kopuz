@@ -89,6 +89,10 @@ def main():
     collector = Collector(targets, args.manifest, os.environ)
     roots = []
     try:
+        # Graph evaluation can cross the host's build window. Recheck its
+        # immutable admission command immediately before starting new work.
+        if collector.env.get('NATIVE_BUILD_ADMISSION_COMMAND'):
+            channel.native_build_admission(collector.env)
         result = subprocess.run(command, env=collector.env,
                                 stdout=None if args.script is not None else subprocess.PIPE, text=True)
         if args.script is None and result.returncode == 0:

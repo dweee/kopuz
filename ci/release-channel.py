@@ -519,6 +519,10 @@ def source():
 def native_build_ready(rules, system, env):
     if rules.get('forge') != 'forgejo' or not system.endswith('-darwin'):
         return
+    native_build_admission(env)
+
+
+def native_build_admission(env):
     checker = env.get('NATIVE_BUILD_ADMISSION_COMMAND', '')
     if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+(?:/[^\s]+)?', checker) or not os.access(checker, os.X_OK):
         raise ValueError('Missing trusted native Darwin build admission command')

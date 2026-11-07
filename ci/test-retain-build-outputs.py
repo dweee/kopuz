@@ -15,6 +15,22 @@ C='/nix/store/'+'c'*32+'-unrelated-store-member'
 
 
 class Retention(unittest.TestCase):
+    def test_admission_is_rechecked_after_graph_selection_and_before_build(self):
+        from types import SimpleNamespace
+        events=[]
+        def collector(*args):
+            events.append('graph')
+            return SimpleNamespace(env={'NATIVE_BUILD_ADMISSION_COMMAND':'fixture'},retain=lambda roots:events.append('retain'))
+        def build(*args,**kwargs):
+            events.append('build')
+            return subprocess.CompletedProcess([],23,'')
+        with patch.object(sys,'argv',['retain','--target','.#sample','--','nix','build','.#sample']), \
+                patch.object(retention,'Collector',side_effect=collector), \
+                patch.object(retention.channel,'native_build_admission',side_effect=lambda env:events.append('admission')), \
+                patch.object(retention.subprocess,'run',side_effect=build):
+            self.assertEqual(retention.main(),23)
+        self.assertEqual(events,['graph','admission','build','retain'])
+
     def test_failure_retains_completed_graph_dependencies_and_original_status(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest=Path(temporary)/'cache-outputs.txt';manifest.write_text(C+'\n')

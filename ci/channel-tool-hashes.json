@@ -1,5 +1,5 @@
 {
-  "release-channel.py": "07dec4393c2ed21ae3bfa19bbdccd6c3d9e2f648dd542462149beb3828f2ee64",
+  "release-channel.py": "8f2f22f245be453555d759fd19cc192398e1f22a3ec48599f4463bbfa46dc1ab",
   "test-release-channel.py": "0dbbb1c611562ff4313791b61b4a3d3a092a15851eb8d9f5ac4695f8fb47c6c9",
   "update-inputs.py": "ce66ee5c77a8b731cee10390c4123b9e467cb376e2443343fdf724baaecfb66f",
   "update-monitor.py": "ff1867c18ef4f549a0d7f84eb828f6a3e44b1575d4d42113bca770ff06e09c74",
@@ -10,9 +10,9 @@
   "push-niks3.py": "b97bbcb63a5d305a4062196e1f52b0912b1a88e735731407bbcbaab39a8b466b",
   "test-push-niks3.py": "a94920042ed3eb03f2a6d970f494de93237658632d7712227e60cfc89492aec2",
   "niks3-oidc-token.py": "58569dc6c6d05232300aae7d03848c66f8678f832d51a1a5326f034da41b2e5f",
-  "install-niks3.sh": "08f799108b9e5f6927230ae91d8a555f68ab2b8aeb6b1abdd75345f72fbbbf25",
-  "retain-build-outputs.py": "13490a4c1fa008446f095b47511a0ce5502cabaf6a311594350466828a9e2d29",
-  "test-retain-build-outputs.py": "89f368a6582767d80fd6f6124699e2df91506af7d87b42240cca0bbe1e6ca1e9",
+  "install-niks3.sh": "55a2f49ee72b9cc24485b31710ecade5cb53f29116bf6141ebf879faeeb852a8",
+  "retain-build-outputs.py": "ff39fa6b6aac595e1ed2fc667aeb537974a3c7313a4745126b923f2627bdeaac",
+  "test-retain-build-outputs.py": "ad509eb232aba1f80fe8f6ca22e8e463f845d798adea2454d354de86d3e6a190",
   "transfer-attic.py": "59dd605f1f61dc90f24d9259825055cd016a361f1f38d85983e678edf88498a4",
   "test-transfer-attic.py": "22b88cb1a352b5b130dd259f00733f373c50bb64c52913fdde22c8db9d58c13d"
 }

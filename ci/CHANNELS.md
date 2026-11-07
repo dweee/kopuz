@@ -3,8 +3,11 @@
 `main` (or the configured source branch) accepts development changes. `tested`
 advances only after the entire explicit native inventory and flake checks build,
 upload, and pass independent remote NAR content and signature verification.
-Each target closure is policy checked and uploaded as soon as it builds, so an
-interrupted run can reuse completed outputs. These partial cache entries do not
+Each target closure is policy checked and uploaded as soon as it builds. Valid
+locally built or custom-cache outputs from its recursive derivation graph are
+also published, including fixed-output/vendor dependencies and completed work
+after a later build failure. Official-upstream-signed substitutes are filtered
+using local metadata; this is not an independent upstream availability proof. These partial cache entries do not
 advance a channel; promotion still waits for the full inventory, native checks,
 and independent verification.
 `stable` is an owner-dispatched selection of an immutable `tested-<commit>` tag;

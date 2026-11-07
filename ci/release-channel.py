@@ -545,6 +545,104 @@ def native_platform_ready(rules, system, env):
     run('/usr/bin/arch', '-x86_64', '/usr/bin/true', env=env)
 
 
+def derivation_output_paths(target, env):
+    document = json.loads(run('nix', 'derivation', 'show', '--recursive', target, *FLAGS, env=env))
+    graph = document.get('derivations', document) if isinstance(document, dict) else None
+    if not isinstance(graph, dict) or not graph:
+        raise ValueError('Missing build dependency graph')
+    version = document.get('version') if 'derivations' in document else None
+    if version is not None and version not in (1, 2, 3, 4):
+        raise ValueError('Unknown derivation graph version')
+    def store_path(path):
+        if isinstance(path, str) and version == 4 and not path.startswith('/'):
+            return '/nix/store/' + path
+        return path
+    paths = set()
+    fixed_outputs = set()
+    for drv, entry in graph.items():
+        drv = store_path(drv)
+        if not STORE.fullmatch(drv) or not drv.endswith('.drv') or not isinstance(entry, dict):
+            raise ValueError('Invalid build dependency graph')
+        outputs = entry.get('outputs')
+        if not isinstance(outputs, dict) or not outputs:
+            raise ValueError('Missing derivation outputs')
+        for output in outputs.values():
+            path = store_path(output.get('path')) if isinstance(output, dict) else None
+            # JSON v4 omits computable fixed-output paths. Let Nix resolve
+            # those identities rather than reimplementing its hash algorithm.
+            if path is None and isinstance(output, dict) and isinstance(output.get('hash'), str) and output['hash']:
+                fixed_outputs.add(drv)
+                continue
+            # Floating content-addressed identities need a separate resolver;
+            # silently omitting them would claim incomplete coverage.
+            if not isinstance(path, str) or not STORE.fullmatch(path) or path.endswith('.drv'):
+                raise ValueError('Unresolved build dependency output')
+            paths.add(path)
+    fixed_outputs = sorted(fixed_outputs)
+    for index in range(0, len(fixed_outputs), 128):
+        resolved = run('nix-store', '--query', '--outputs', *fixed_outputs[index:index+128], env=env).splitlines()
+        if not resolved or any(not STORE.fullmatch(path) or path.endswith('.drv') for path in resolved):
+            raise ValueError('Unresolved fixed build dependency output')
+        paths.update(resolved)
+    return paths
+
+
+def completed_build_outputs(candidates, env):
+    # Query only graph candidates in the local daemon. Invalid paths are null
+    # in the pinned Nix JSON API; no graph output is realized or substituted.
+    candidates = sorted(candidates)
+    selected = []
+    for index in range(0, len(candidates), 128):
+        batch = candidates[index:index+128]
+        document = json.loads(run('nix', 'path-info', '--json',
+                                  '--option', 'substituters', '', '--option', 'extra-substituters', '',
+                                  *batch, env=env))
+        if isinstance(document, list):
+            document = {entry['path']: entry for entry in document if entry is not None}
+        if not isinstance(document, dict) or set(document) - set(batch):
+            raise ValueError('Invalid local output inventory')
+        for path, entry in sorted(document.items()):
+            if entry is None:
+                continue
+            metadata(entry)
+            signatures = entry.get('signatures', [])
+            if not isinstance(signatures, list) or any(not isinstance(sig, str) for sig in signatures):
+                raise ValueError('Invalid output signatures')
+            # Keep the official-upstream signature convention: locally built or
+            # unsigned/custom-cache outputs need private publication. This is
+            # selection metadata, not an independent upstream cache proof.
+            if entry.get('ultimate') is not True and any(sig.startswith('cache.nixos.org-1:') for sig in signatures):
+                continue
+            selected.append(path)
+    return selected
+
+
+def build_with_dependencies(attr, rules, system, visibility, env, publish_env, outputs, label):
+    candidates = derivation_output_paths(attr, env)
+    native_build_ready(rules, system, env)
+    phase(label)
+    successful_outputs = []
+    try:
+        successful_outputs = run('nix', 'build', attr + '^*', *FLAGS, '--fallback', '--no-link',
+                                 '--print-out-paths', env=env).splitlines()
+        return successful_outputs
+    finally:
+        # A failed later derivation does not invalidate completed vendor,
+        # compiler or check dependencies. Publish only valid outputs from this
+        # selected graph, never arbitrary paths in a shared builder's store.
+        paths = completed_build_outputs(candidates - set(successful_outputs), env)
+        if paths:
+            closure = info(paths, env)
+            if rules['forge'] == 'github':
+                if visibility == 'cache-only':
+                    module('build-cache-only.py').check(list(closure))
+                else:
+                    module('public-closure.py').check_paths(list(closure))
+            outputs.write_text('\n'.join(paths) + '\n')
+            phase('upload-completed-build-dependencies')
+            run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs), env=publish_env)
+
+
 def build(system):
     rules = policy()
     if rules.get('kind') == 'fleet':
@@ -584,10 +682,8 @@ def build(system):
                 guard = module('build-cache-only.py')
                 graph = json.loads(run('nix', 'derivation', 'show', '--recursive', attr, *FLAGS, env=env))
                 guard.check(graph)
-            native_build_ready(rules, system, env)
-            phase('build-required-output')
-            paths = run('nix', 'build', attr + '^*', *FLAGS, '--fallback', '--no-link',
-                        '--print-out-paths', env=env).splitlines()
+            paths = build_with_dependencies(attr, rules, system, target['visibility'], env,
+                                            publish_env, outputs, 'build-required-output')
             if not paths or any(not STORE.fullmatch(p) or p.endswith('.drv') for p in paths):
                 raise ValueError('Missing built outputs')
             target_closure = info(paths, env)
@@ -616,8 +712,16 @@ def build(system):
             native_build_ready(rules, system, env)
             if not re.fullmatch(r'[\w+-]+', name):
                 raise ValueError('Invalid check name')
-            check_paths = run('nix', 'build', flake + '#checks.' + system + '.' + name + '^*',
-                              *FLAGS, '--no-link', '--print-out-paths', env=env).splitlines()
+            check_attr = flake + '#checks.' + system + '.' + name
+            check_visibility = 'cache-only' if all(t['visibility'] == 'cache-only' for t in targets) else 'public'
+            if rules['forge'] == 'github':
+                with build_environment(env):
+                    if check_visibility == 'cache-only':
+                        module('build-cache-only.py').check(json.loads(run('nix', 'derivation', 'show', '--recursive', check_attr, *FLAGS, env=env)))
+                    else:
+                        module('public-closure.py').derivation(check_attr)
+            check_paths = build_with_dependencies(check_attr, rules, system, check_visibility, env,
+                                                  publish_env, outputs, 'build-native-check')
             if not check_paths or any(not STORE.fullmatch(p) or p.endswith('.drv') for p in check_paths):
                 raise ValueError('Missing native check outputs')
             # Checks can be expensive build-only outputs. Cache each completed

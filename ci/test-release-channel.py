@@ -524,4 +524,92 @@ class WholeFlakeEvaluation(unittest.TestCase):
             self.assertEqual(c.native_check_names(flake,'aarch64-linux',dict(os.environ)),[])
 
 
+class BuildDependencies(unittest.TestCase):
+    def test_recursive_graph_tracks_all_outputs_in_both_json_formats(self):
+        graph = {'/nix/store/' + 'c'*32 + '-root.drv': {'outputs': {'out': {'path': A}, 'dev': {'path': B}}}}
+        relative = {key.removeprefix('/nix/store/'): {'outputs': {name: {'path': value['path'].removeprefix('/nix/store/')} for name, value in entry['outputs'].items()}} for key, entry in graph.items()}
+        for document in (graph, {'version': 3, 'derivations': graph}, {'version': 4, 'derivations': relative}):
+            with patch.object(c, 'run', return_value=json.dumps(document)) as run:
+                self.assertEqual(c.derivation_output_paths('fixture#package', {}), {A, B})
+                self.assertIn('--recursive', run.call_args.args)
+                self.assertNotIn('build', run.call_args.args)
+
+    def test_json4_fixed_output_identities_are_resolved_by_nix_without_building(self):
+        drv = '/nix/store/' + 'c'*32 + '-fetch.drv'
+        graph = {'version': 4, 'derivations': {drv.removeprefix('/nix/store/'): {
+            'outputs': {'out': {'hash': 'sha256-fixture', 'method': 'flat'}}}}}
+        with patch.object(c, 'run', side_effect=[json.dumps(graph), B]) as run:
+            self.assertEqual(c.derivation_output_paths('fixture#package', {}), {B})
+            self.assertEqual(run.call_args.args, ('nix-store', '--query', '--outputs', drv))
+
+    def test_unresolved_or_invalid_graph_outputs_fail_before_build(self):
+        for output in ({}, {'path': None}, {'path': '/tmp/arbitrary'}, {'path': A + '.drv'}):
+            graph = {'/nix/store/' + 'c'*32 + '-root.drv': {'outputs': {'out': output}}}
+            with patch.object(c, 'run', return_value=json.dumps(graph)) as run:
+                with self.assertRaises(ValueError): c.derivation_output_paths('fixture#package', {})
+                self.assertEqual(run.call_count, 1)
+
+    def test_only_valid_graph_outputs_are_selected_without_substitution(self):
+        for document in ({A: None, B: dict(ENTRY, signatures=[])},
+                         [None, dict(ENTRY, path=B, signatures=[])]):
+            with patch.object(c, 'run', return_value=json.dumps(document)) as run:
+                self.assertEqual(c.completed_build_outputs({A, B}, {}), [B])
+                args = run.call_args.args
+                self.assertEqual(args[:3], ('nix', 'path-info', '--json'))
+                self.assertEqual(args[args.index('substituters')+1], '')
+                self.assertEqual(args[args.index('extra-substituters')+1], '')
+                self.assertNotIn('--all', args)
+                self.assertNotIn('build', args)
+
+    def test_unrelated_store_outputs_cannot_enter_dependency_publication(self):
+        unrelated = '/nix/store/' + 'd'*32 + '-unrelated-private-output'
+        with patch.object(c, 'run', return_value=json.dumps({unrelated: ENTRY})):
+            with self.assertRaises(ValueError): c.completed_build_outputs({A, B}, {})
+
+    def test_official_signed_substitutes_are_skipped_but_local_and_private_outputs_retained(self):
+        entries = {A: dict(ENTRY, signatures=['cache.nixos.org-1:fixture']),
+                   B: dict(ENTRY, signatures=['niks3.monke.fail-1:fixture'])}
+        with patch.object(c, 'run', return_value=json.dumps(entries)):
+            self.assertEqual(c.completed_build_outputs({A, B}, {}), [B])
+        entries[A]['ultimate'] = True
+        with patch.object(c, 'run', return_value=json.dumps(entries)):
+            self.assertEqual(c.completed_build_outputs({A, B}, {}), [A, B])
+
+    def test_later_build_failure_still_publishes_completed_dependencies_and_propagates(self):
+        graph = {'/nix/store/' + 'c'*32 + '-root.drv': {'outputs': {'out': {'path': A}, 'dev': {'path': B}}}}
+        original = c.CommandFailure('fixture build failed')
+        build_env = {'PATH': '/fixture/bin'}
+        publisher_env = dict(build_env, NIKS3_WRITE_TOKEN='synthetic-writer')
+        with tempfile.TemporaryDirectory() as temporary:
+            outputs = Path(temporary) / 'outputs'
+            def run(*args, **kwargs):
+                if args[:3] == ('nix', 'derivation', 'show'):
+                    self.assertEqual(kwargs['env'], build_env)
+                    return json.dumps(graph)
+                if args[:2] == ('nix', 'build'):
+                    self.assertEqual(kwargs['env'], build_env)
+                    raise original
+                if args[:3] == ('nix', 'path-info', '--json'):
+                    self.assertEqual(kwargs['env'], build_env)
+                    return json.dumps({B: dict(ENTRY, signatures=[])})
+                self.assertEqual(kwargs['env'], publisher_env)
+                self.assertEqual(args[1], str(c.ROOT / 'ci/push-niks3.py'))
+                self.assertEqual(outputs.read_text(), B + '\n')
+                return ''
+            with patch.object(c, 'run', side_effect=run) as commands, patch.object(c, 'info', return_value={B: ENTRY}):
+                with self.assertRaises(c.CommandFailure) as raised:
+                    c.build_with_dependencies('fixture#package', {'forge': 'forgejo'}, 'x86_64-linux',
+                                              'private', build_env, publisher_env, outputs, 'build-required-output')
+            self.assertIs(raised.exception, original)
+            self.assertEqual(commands.call_count, 4)
+
+    def test_publication_failure_blocks_a_successful_build(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(c, 'derivation_output_paths', return_value={A, B}), \
+                patch.object(c, 'completed_build_outputs', return_value=[B]), patch.object(c, 'info', return_value={B: ENTRY}), \
+                patch.object(c, 'run', side_effect=[A, c.CommandFailure('fixture upload failed')]):
+            with self.assertRaises(c.CommandFailure):
+                c.build_with_dependencies('fixture#package', {'forge': 'forgejo'}, 'x86_64-linux',
+                                          'private', {}, {}, Path(temporary) / 'outputs', 'build-required-output')
+
+
 if __name__ == '__main__': unittest.main()

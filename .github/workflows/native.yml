@@ -156,7 +156,7 @@ jobs:
     - name: Save selected runtime closures independently of cache publication
       timeout-minutes: 15
       env:
-        ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '4096' }}
+        ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '8192' }}
       run: python3 ci/transfer-attic.py export --directory attic-transfer --manifest cache-outputs.txt
       id: cache_transfer
       if: ${{ always() && !cancelled() && hashFiles('cache-outputs.txt') != '' }}
@@ -227,7 +227,7 @@ jobs:
     - name: Import data without running any package programs
       timeout-minutes: 15
       env:
-        ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '4096' }}
+        ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '8192' }}
       run: python3 ci/transfer-attic.py import --directory attic-transfer
     - name: Publish to Niks3 with GitHub OIDC and verify S3 integrity
       run: python3 ci/push-niks3.py --outputs attic-transfer/outputs.txt

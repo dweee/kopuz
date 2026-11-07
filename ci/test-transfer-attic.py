@@ -77,18 +77,17 @@ class TransferSafetyTests(unittest.TestCase):
     def assert_isolated_workflow(self, content):
         build, separator, publisher = content.partition('\n  publish:\n')
         self.assertTrue(separator, 'The isolated publisher job must exist')
-        for index, line in enumerate(build.splitlines()):
-            if 'secrets.ATTIC_TOKEN' in line:
-                preceding = '\n'.join(build.splitlines()[max(0, index-5):index])
-                self.assertIn("github.event_name == 'push'", preceding)
-                self.assertIn('github.event.repository.default_branch', preceding)
-        self.assertEqual(publisher.count('secrets.ATTIC_TOKEN'), 1)
+        self.assertNotIn('secrets.ATTIC_TOKEN', build + publisher)
+        self.assertNotIn('ci/push-niks3.py', build)
+        self.assertIn('ci/configure-niks3.py --oidc', build)
+        self.assertIn('id-token: write', build)
+        self.assertIn('id-token: write', publisher)
         self.assertIn('needs: build', publisher)
-        self.assertIn('--max-jobs 0 --builders', publisher)
+        self.assertNotIn('nix build', publisher)
         self.assertIn('github.event.repository.default_branch', publisher)
         self.assertIn("github.event_name == 'workflow_dispatch' || github.event_name == 'push'", publisher)
-        self.assertLess(publisher.index('Install the trusted pinned Attic client'), publisher.index('ci/transfer-attic.py import'))
-        self.assertLess(publisher.index('ci/transfer-attic.py import'), publisher.index('secrets.ATTIC_TOKEN'))
+        self.assertLess(publisher.index('ci/install-niks3.sh'), publisher.index('ci/transfer-attic.py import'))
+        self.assertLess(publisher.index('ci/transfer-attic.py import'), publisher.index('ci/push-niks3.py'))
         self.assertNotIn('nix develop', publisher)
         self.assertNotIn('Build native package', publisher)
 

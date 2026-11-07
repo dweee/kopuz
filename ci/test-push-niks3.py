@@ -48,13 +48,28 @@ class Publication(unittest.TestCase):
                 run.assert_not_called()
     def test_failure_never_succeeds(self):
         with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],1,'','denied')):
-            with self.assertRaises(subprocess.CalledProcessError):publisher.publish(self.manifest)
+            with self.assertRaises(publisher.PublicationFailure):publisher.publish(self.manifest)
     def test_bad_manifest_or_destination_never_runs(self):
         for text in ['',self.path+'.drv\n','/tmp/arbitrary\n']:
             self.manifest.write_text(text)
             with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run') as run:
                 with self.assertRaises(ValueError):publisher.publish(self.manifest)
                 run.assert_not_called()
+    def test_diagnostics_classify_without_exposing_credentials(self):
+        for message, category, retry in [
+            ('Unauthorized bearer synthetic-secret', 'authentication-rejected', False),
+            ('hash mismatch presigned-url', 'integrity-mismatch', False),
+            ('HTTP 503 ServiceUnavailable', 'service-unavailable', True),
+            ('connection reset token=synthetic-secret', 'transport', True),
+            ('unknown error token=synthetic-secret', 'publisher-rejected', False),
+        ]:
+            self.assertEqual(publisher.failure_category(message), (category, retry))
+
+    def test_missing_optional_summary_does_not_relabel_success(self):
+        env=self.env|{'GITHUB_STEP_SUMMARY':str(self.root/'absent/summary')}
+        with patch.dict(os.environ,env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')):
+            publisher.publish(self.manifest)
+
     def test_oidc_json_protocol_and_audience(self):
         mod=load('niks3-oidc-token'); import base64
         value='header.'+base64.urlsafe_b64encode(json.dumps({'exp':2000000000}).encode()).decode().rstrip('=')+'.signature'

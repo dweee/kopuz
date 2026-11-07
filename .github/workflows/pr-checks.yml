@@ -50,6 +50,7 @@ jobs:
     - name: Regression tests and complete inventory policy
       run: |-
         python3 ci/test-release-channel.py
+        python3 ci/test-push-niks3.py
         python3 ci/test-update-automation.py
         python3 ci/release-channel.py policy
     - name: Select immutable revision

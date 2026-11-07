@@ -31,7 +31,7 @@ class Gates(unittest.TestCase):
         self.assertEqual(report['fields'], ['narSize', 'references'])
         self.assertEqual(report['action'], 'rejected')
         self.assertTrue(report['root'])
-        self.assertEqual(report['origin'], 'attic')
+        self.assertEqual(report['origin'], 'niks3')
         self.assertEqual(report['expectedMetadataDigest'], c.digest(ENTRY))
         self.assertNotEqual(report['expectedMetadataDigest'], report['actualMetadataDigest'])
         self.assertNotIn('/nix/store', output.getvalue())
@@ -264,23 +264,22 @@ class AtticServer(unittest.TestCase):
         for env in [{}, {'ATTIC_SERVER': ''}, {'ATTIC_SERVER': ' '}, {'ATTIC_SERVER': PUBLIC}, {'ATTIC_SERVER': PUBLIC + '/'}]:
             with self.subTest(env=env):
                 module = self.load(**env)
-                self.assertEqual(module.CACHE, PUBLIC + '/flakey')
-                self.assertEqual(module.PUBLIC_CACHE, PUBLIC + '/flakey')
+                self.assertEqual(module.CACHE, 'https://niks3.monke.fail/oidc')
+                self.assertEqual(module.PUBLIC_CACHE, 'https://niks3.monke.fail')
 
     def test_internal_and_tailnet_servers_select_their_cache(self):
         for server in [INTERNAL, TAILNET]:
             for value in [server, server + '/']:
                 with self.subTest(value=value):
                     module = self.load(ATTIC_SERVER=value)
-                    self.assertEqual(module.CACHE, server + '/flakey')
-                    self.assertEqual(module.PUBLIC_CACHE, PUBLIC + '/flakey')
+                    self.assertEqual(module.CACHE, 'https://niks3.monke.fail/oidc')
+                    self.assertEqual(module.PUBLIC_CACHE, 'https://niks3.monke.fail')
 
     def test_only_reviewed_origins_are_accepted(self):
         for value in REJECTED:
             with self.subTest(value=value):
                 with self.assertRaises(ValueError): c.attic_server({'ATTIC_SERVER': value})
-                with self.assertRaises(SystemExit) as stop: self.load(ATTIC_SERVER=value)
-                self.assertNotIn(value, str(stop.exception))
+                self.assertEqual(self.load(ATTIC_SERVER=value).CACHE, 'https://niks3.monke.fail/oidc')
 
     def test_reader_helper_agrees_with_the_release_tool(self):
         for value in [None, '', PUBLIC, PUBLIC + '/', INTERNAL, INTERNAL + '/', TAILNET, TAILNET + '/'] + REJECTED:
@@ -309,10 +308,10 @@ class AtticServer(unittest.TestCase):
         return closure, proof, audited
 
     def test_proofs_are_identical_whichever_transport_read_the_cache(self):
-        public = self.audit_proof(PUBLIC + '/flakey')
+        public = self.audit_proof('https://niks3.monke.fail')
         # A record written through one transport is accepted through the others.
-        for server in [INTERNAL, TAILNET]:
-            other = self.audit_proof(server + '/flakey')
+        for server in ['https://niks3.monke.fail/oidc']:
+            other = self.audit_proof(server)
             self.assertEqual(public[:2], other[:2])
             self.assertEqual(public[2], other[2])
             self.assertNotIn('attic', json.dumps(other[2]))
@@ -329,7 +328,7 @@ class AtticServer(unittest.TestCase):
             self.assertNotIn('172.29', output.getvalue())
             self.assertNotIn('ts.net', output.getvalue())
             self.assertNotIn('monke.fail', output.getvalue())
-            self.assertEqual(json.loads(output.getvalue().splitlines()[0].split(': ', 1)[1])['origin'], 'attic')
+            self.assertEqual(json.loads(output.getvalue().splitlines()[0].split(': ', 1)[1])['origin'], 'niks3')
 
 
 class ReaderEndpoint(unittest.TestCase):

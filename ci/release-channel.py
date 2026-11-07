@@ -28,7 +28,7 @@ INTERNAL_ATTIC = 'http://172.29.0.1:8080'
 # The same listener over the tailnet, for the host-mode braco runner.
 TAILNET_ATTIC = 'http://icicle.eel-ling.ts.net:8080'
 REVIEWED_ATTIC = {PUBLIC_ATTIC, INTERNAL_ATTIC, TAILNET_ATTIC}
-PUBLIC_CACHE = PUBLIC_ATTIC + '/flakey'
+PUBLIC_CACHE = 'https://niks3.monke.fail'
 
 
 def attic_server(environ=None):
@@ -44,11 +44,8 @@ def attic_server(environ=None):
     return value or PUBLIC_ATTIC
 
 
-try:
-    CACHE = ('https://niks3.monke.fail' if json.loads((ROOT/'ci/channels.json').read_text()).get('forge') == 'forgejo' else attic_server() + '/flakey')
-except ValueError as error:
-    sys.exit('Release channel gate failed during startup: ' + str(error) + '.')
-KEY = ('niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=' if CACHE == 'https://niks3.monke.fail' else 'flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=')
+CACHE = 'https://niks3.monke.fail' + ('/oidc' if json.loads((ROOT/'ci/channels.json').read_text()).get('forge') == 'github' else '')
+KEY = 'niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M='
 UPSTREAM = 'https://cache.nixos.org'
 UPSTREAM_KEY = 'cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
 STORE = re.compile(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+')
@@ -291,7 +288,7 @@ def metadata(entry):
 def report_metadata_difference(path, roots, origin, expected, actual, recheck=False, action='rejected'):
     # Only fixed field labels and one-way digests leave the verifier. Paths,
     # reference lists, credentials and raw remote metadata remain suppressed.
-    detail = {'root': path in roots, 'origin': 'attic' if origin == CACHE else 'upstream',
+    detail = {'root': path in roots, 'origin': 'niks3' if origin == CACHE else 'upstream',
               'read': 'fresh' if recheck else 'initial', 'action': action,
               'fields': [k for k in ['narHash', 'narSize', 'references'] if expected[k] != actual[k]],
               'pathDigest': hashlib.sha256(path.encode()).hexdigest(),
@@ -519,6 +516,17 @@ def source():
     return sha
 
 
+def native_build_ready(rules, system, env):
+    if rules.get('forge') != 'forgejo' or not system.endswith('-darwin'):
+        return
+    checker = env.get('NATIVE_BUILD_ADMISSION_COMMAND', '')
+    if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+(?:/[^\s]+)?', checker) or not os.access(checker, os.X_OK):
+        raise ValueError('Missing trusted native Darwin build admission command')
+    result = subprocess.run([checker], env=env, capture_output=True, timeout=15)
+    if result.returncode:
+        raise ValueError('Native Darwin build readiness gate rejected new work')
+
+
 def build(system):
     rules = policy()
     if rules.get('kind') == 'fleet':
@@ -546,13 +554,6 @@ def build(system):
     with tempfile.TemporaryDirectory(prefix='channel-outputs-') as directory:
         phase('prepare-cache-publisher')
         publish_env = dict(os.environ)
-        if rules['forge'] == 'github':
-            client = run('nix', 'build', '--inputs-from', flake, 'nixpkgs#attic-client', *FLAGS,
-                         '--out-link', str(Path(directory) / 'attic-client'), '--print-out-paths', env=env)
-            if not STORE.fullmatch(client):
-                raise ValueError('Invalid publisher')
-            publish_env.update(ATTIC_BIN=client + '/bin/attic',
-                               ATTIC_ENDPOINT='https://attic.monke.fail', ATTIC_CACHE='flakey')
         outputs = Path(directory) / 'outputs.txt'
         for index, target in enumerate(targets, 1):
             print(f'Processing inventory target {index}/{len(targets)}', flush=True)
@@ -566,6 +567,7 @@ def build(system):
                 guard = module('build-cache-only.py')
                 graph = json.loads(run('nix', 'derivation', 'show', '--recursive', attr, *FLAGS, env=env))
                 guard.check(graph)
+            native_build_ready(rules, system, env)
             phase('build-required-output')
             paths = run('nix', 'build', attr + '^*', *FLAGS, '--fallback', '--no-link',
                         '--print-out-paths', env=env).splitlines()
@@ -586,8 +588,6 @@ def build(system):
             # inventory, checks and independent cache verification below.
             outputs.write_text('\n'.join(paths) + '\n')
             phase('upload-target-closure')
-            if rules['forge'] == 'github':
-                run(sys.executable, str(ROOT / 'ci/push-attic.py'), '--outputs', str(outputs), env=publish_env)
             run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs), env=publish_env)
             roots.extend(paths)
             print(f'Built and cached inventory target {index}/{len(targets)}', flush=True)
@@ -596,6 +596,7 @@ def build(system):
         phase('build-native-checks')
         checks = native_check_names(flake, system, env)
         for name in checks:
+            native_build_ready(rules, system, env)
             if not re.fullmatch(r'[\w+-]+', name):
                 raise ValueError('Invalid check name')
             run('nix', 'build', flake + '#checks.' + system + '.' + name, *FLAGS, '--no-link', env=env)

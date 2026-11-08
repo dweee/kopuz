@@ -102,8 +102,8 @@ artifacts for one day; the existing `Preserve package backups` workflow may
 copy those archives to public prereleases. These are public redistribution,
 which is why the closure policy runs before the archive exists.
 
-Transfers default to a maximum of 4 GiB uncompressed; `ATTIC_MAX_CLOSURE_MIB`
-accepts 1–4096 MiB. An oversize closure fails rather than silently dropping data.
+Transfers default to a maximum of 8 GiB uncompressed; `ATTIC_MAX_CLOSURE_MIB`
+accepts 1–8192 MiB. An oversize closure fails rather than silently dropping data.
 Build summaries show build and upload duration. Cache success still requires
 checking the consumer's exact output store path and authenticated narinfo URL.
 

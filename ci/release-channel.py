@@ -28,7 +28,7 @@ INTERNAL_ATTIC = 'http://172.29.0.1:8080'
 # The same listener over the tailnet, for the host-mode braco runner.
 TAILNET_ATTIC = 'http://icicle.eel-ling.ts.net:8080'
 REVIEWED_ATTIC = {PUBLIC_ATTIC, INTERNAL_ATTIC, TAILNET_ATTIC}
-PUBLIC_CACHE = PUBLIC_ATTIC + '/flakey'
+PUBLIC_CACHE = 'https://niks3.monke.fail'
 
 
 def attic_server(environ=None):
@@ -44,11 +44,8 @@ def attic_server(environ=None):
     return value or PUBLIC_ATTIC
 
 
-try:
-    CACHE = ('https://niks3.monke.fail' if json.loads((ROOT/'ci/channels.json').read_text()).get('forge') == 'forgejo' else attic_server() + '/flakey')
-except ValueError as error:
-    sys.exit('Release channel gate failed during startup: ' + str(error) + '.')
-KEY = ('niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=' if CACHE == 'https://niks3.monke.fail' else 'flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8=')
+CACHE = 'https://niks3.monke.fail' + ('/oidc' if json.loads((ROOT/'ci/channels.json').read_text()).get('forge') == 'github' else '')
+KEY = 'niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M='
 UPSTREAM = 'https://cache.nixos.org'
 UPSTREAM_KEY = 'cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
 STORE = re.compile(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+')
@@ -291,7 +288,7 @@ def metadata(entry):
 def report_metadata_difference(path, roots, origin, expected, actual, recheck=False, action='rejected'):
     # Only fixed field labels and one-way digests leave the verifier. Paths,
     # reference lists, credentials and raw remote metadata remain suppressed.
-    detail = {'root': path in roots, 'origin': 'attic' if origin == CACHE else 'upstream',
+    detail = {'root': path in roots, 'origin': 'niks3' if origin == CACHE else 'upstream',
               'read': 'fresh' if recheck else 'initial', 'action': action,
               'fields': [k for k in ['narHash', 'narSize', 'references'] if expected[k] != actual[k]],
               'pathDigest': hashlib.sha256(path.encode()).hexdigest(),
@@ -519,6 +516,137 @@ def source():
     return sha
 
 
+def native_build_ready(rules, system, env):
+    if rules.get('forge') != 'forgejo' or not system.endswith('-darwin'):
+        return
+    native_build_admission(env)
+
+
+def native_build_admission(env):
+    checker = env.get('NATIVE_BUILD_ADMISSION_COMMAND', '')
+    if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+(?:/[^\s]+)?', checker) or not os.access(checker, os.X_OK):
+        raise ValueError('Missing trusted native Darwin build admission command')
+    result = subprocess.run([checker], env=env, capture_output=True, timeout=15)
+    if result.returncode:
+        raise ValueError('Native Darwin build readiness gate rejected new work')
+
+
+def native_platform_ready(rules, system, env):
+    actual = run('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem', env=env)
+    if actual == system:
+        return
+    # A private ARM Mac runner may explicitly advertise its verified Rosetta
+    # capability. Do not generalize this to arbitrary cross-platform builders.
+    if (rules.get('forge') != 'forgejo' or actual != 'aarch64-darwin'
+            or system != 'x86_64-darwin'
+            or system not in env.get('NATIVE_BUILD_COMPATIBLE_SYSTEMS', '').split()):
+        raise ValueError('Native builder required')
+    native_build_ready(rules, system, env)
+    settings = json.loads(run('nix', 'config', 'show', '--json', env=env))
+    platforms = settings.get('extra-platforms', {}).get('value', [])
+    if not isinstance(platforms, list) or system not in platforms:
+        raise ValueError('Intel Darwin compatibility is not configured in Nix')
+    run('/usr/bin/arch', '-x86_64', '/usr/bin/true', env=env)
+
+
+def derivation_output_paths(target, env):
+    document = json.loads(run('nix', 'derivation', 'show', '--recursive', target, *FLAGS, env=env))
+    graph = document.get('derivations', document) if isinstance(document, dict) else None
+    if not isinstance(graph, dict) or not graph:
+        raise ValueError('Missing build dependency graph')
+    version = document.get('version') if 'derivations' in document else None
+    if version is not None and version not in (1, 2, 3, 4):
+        raise ValueError('Unknown derivation graph version')
+    def store_path(path):
+        if isinstance(path, str) and version == 4 and not path.startswith('/'):
+            return '/nix/store/' + path
+        return path
+    paths = set()
+    fixed_outputs = set()
+    for drv, entry in graph.items():
+        drv = store_path(drv)
+        if not STORE.fullmatch(drv) or not drv.endswith('.drv') or not isinstance(entry, dict):
+            raise ValueError('Invalid build dependency graph')
+        outputs = entry.get('outputs')
+        if not isinstance(outputs, dict) or not outputs:
+            raise ValueError('Missing derivation outputs')
+        for output in outputs.values():
+            path = store_path(output.get('path')) if isinstance(output, dict) else None
+            # JSON v4 omits computable fixed-output paths. Let Nix resolve
+            # those identities rather than reimplementing its hash algorithm.
+            if path is None and isinstance(output, dict) and isinstance(output.get('hash'), str) and output['hash']:
+                fixed_outputs.add(drv)
+                continue
+            # Floating content-addressed identities need a separate resolver;
+            # silently omitting them would claim incomplete coverage.
+            if not isinstance(path, str) or not STORE.fullmatch(path) or path.endswith('.drv'):
+                raise ValueError('Unresolved build dependency output')
+            paths.add(path)
+    fixed_outputs = sorted(fixed_outputs)
+    for index in range(0, len(fixed_outputs), 128):
+        resolved = run('nix-store', '--query', '--outputs', *fixed_outputs[index:index+128], env=env).splitlines()
+        if not resolved or any(not STORE.fullmatch(path) or path.endswith('.drv') for path in resolved):
+            raise ValueError('Unresolved fixed build dependency output')
+        paths.update(resolved)
+    return paths
+
+
+def completed_build_outputs(candidates, env):
+    # Query only graph candidates in the local daemon. Invalid paths are null
+    # in the pinned Nix JSON API; no graph output is realized or substituted.
+    candidates = sorted(candidates)
+    selected = []
+    for index in range(0, len(candidates), 128):
+        batch = candidates[index:index+128]
+        document = json.loads(run('nix', 'path-info', '--json',
+                                  '--option', 'substituters', '', '--option', 'extra-substituters', '',
+                                  *batch, env=env))
+        if isinstance(document, list):
+            document = {entry['path']: entry for entry in document if entry is not None}
+        if not isinstance(document, dict) or set(document) - set(batch):
+            raise ValueError('Invalid local output inventory')
+        for path, entry in sorted(document.items()):
+            if entry is None:
+                continue
+            metadata(entry)
+            signatures = entry.get('signatures', [])
+            if not isinstance(signatures, list) or any(not isinstance(sig, str) for sig in signatures):
+                raise ValueError('Invalid output signatures')
+            # Keep the official-upstream signature convention: locally built or
+            # unsigned/custom-cache outputs need private publication. This is
+            # selection metadata, not an independent upstream cache proof.
+            if entry.get('ultimate') is not True and any(sig.startswith('cache.nixos.org-1:') for sig in signatures):
+                continue
+            selected.append(path)
+    return selected
+
+
+def build_with_dependencies(attr, rules, system, visibility, env, publish_env, outputs, label):
+    candidates = derivation_output_paths(attr, env)
+    native_build_ready(rules, system, env)
+    phase(label)
+    successful_outputs = []
+    try:
+        successful_outputs = run('nix', 'build', attr + '^*', *FLAGS, '--fallback', '--no-link',
+                                 '--print-out-paths', env=env).splitlines()
+        return successful_outputs
+    finally:
+        # A failed later derivation does not invalidate completed vendor,
+        # compiler or check dependencies. Publish only valid outputs from this
+        # selected graph, never arbitrary paths in a shared builder's store.
+        paths = completed_build_outputs(candidates - set(successful_outputs), env)
+        if paths:
+            closure = info(paths, env)
+            if rules['forge'] == 'github':
+                if visibility == 'cache-only':
+                    module('build-cache-only.py').check(list(closure))
+                else:
+                    module('public-closure.py').check_paths(list(closure))
+            outputs.write_text('\n'.join(paths) + '\n')
+            phase('upload-completed-build-dependencies')
+            run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs), env=publish_env)
+
+
 def build(system):
     rules = policy()
     if rules.get('kind') == 'fleet':
@@ -528,8 +656,7 @@ def build(system):
     env = {k: v for k, v in os.environ.items()
            if k not in {'ATTIC_TOKEN', 'CHANNEL_TOKEN', 'SOURCE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'NIKS3_WRITE_TOKEN', 'NIKS3_AUTH_TOKEN_FILE', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL'}}
     phase('check-native-platform')
-    if run('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem', env=env) != system:
-        raise ValueError('Native builder required')
+    native_platform_ready(rules, system, env)
     targets = rules['targets'][system]
     # Preserve Git self.rev/lastModified, and exclude checkout submodules and
     # untracked CI files just as the consuming git flake does.
@@ -546,13 +673,6 @@ def build(system):
     with tempfile.TemporaryDirectory(prefix='channel-outputs-') as directory:
         phase('prepare-cache-publisher')
         publish_env = dict(os.environ)
-        if rules['forge'] == 'github':
-            client = run('nix', 'build', '--inputs-from', flake, 'nixpkgs#attic-client', *FLAGS,
-                         '--out-link', str(Path(directory) / 'attic-client'), '--print-out-paths', env=env)
-            if not STORE.fullmatch(client):
-                raise ValueError('Invalid publisher')
-            publish_env.update(ATTIC_BIN=client + '/bin/attic',
-                               ATTIC_ENDPOINT='https://attic.monke.fail', ATTIC_CACHE='flakey')
         outputs = Path(directory) / 'outputs.txt'
         for index, target in enumerate(targets, 1):
             print(f'Processing inventory target {index}/{len(targets)}', flush=True)
@@ -566,9 +686,8 @@ def build(system):
                 guard = module('build-cache-only.py')
                 graph = json.loads(run('nix', 'derivation', 'show', '--recursive', attr, *FLAGS, env=env))
                 guard.check(graph)
-            phase('build-required-output')
-            paths = run('nix', 'build', attr + '^*', *FLAGS, '--fallback', '--no-link',
-                        '--print-out-paths', env=env).splitlines()
+            paths = build_with_dependencies(attr, rules, system, target['visibility'], env,
+                                            publish_env, outputs, 'build-required-output')
             if not paths or any(not STORE.fullmatch(p) or p.endswith('.drv') for p in paths):
                 raise ValueError('Missing built outputs')
             target_closure = info(paths, env)
@@ -586,8 +705,6 @@ def build(system):
             # inventory, checks and independent cache verification below.
             outputs.write_text('\n'.join(paths) + '\n')
             phase('upload-target-closure')
-            if rules['forge'] == 'github':
-                run(sys.executable, str(ROOT / 'ci/push-attic.py'), '--outputs', str(outputs), env=publish_env)
             run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs), env=publish_env)
             roots.extend(paths)
             print(f'Built and cached inventory target {index}/{len(targets)}', flush=True)
@@ -596,9 +713,26 @@ def build(system):
         phase('build-native-checks')
         checks = native_check_names(flake, system, env)
         for name in checks:
+            native_build_ready(rules, system, env)
             if not re.fullmatch(r'[\w+-]+', name):
                 raise ValueError('Invalid check name')
-            run('nix', 'build', flake + '#checks.' + system + '.' + name, *FLAGS, '--no-link', env=env)
+            check_attr = flake + '#checks.' + system + '.' + name
+            check_visibility = 'cache-only' if all(t['visibility'] == 'cache-only' for t in targets) else 'public'
+            if rules['forge'] == 'github':
+                with build_environment(env):
+                    if check_visibility == 'cache-only':
+                        module('build-cache-only.py').check(json.loads(run('nix', 'derivation', 'show', '--recursive', check_attr, *FLAGS, env=env)))
+                    else:
+                        module('public-closure.py').derivation(check_attr)
+            check_paths = build_with_dependencies(check_attr, rules, system, check_visibility, env,
+                                                  publish_env, outputs, 'build-native-check')
+            if not check_paths or any(not STORE.fullmatch(p) or p.endswith('.drv') for p in check_paths):
+                raise ValueError('Missing native check outputs')
+            # Checks can be expensive build-only outputs. Cache each completed
+            # check even if a later check or release verification fails.
+            outputs.write_text('\n'.join(check_paths) + '\n')
+            phase('upload-check-closure')
+            run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs), env=publish_env)
         roots = sorted(set(roots))
         phase('inspect-built-closure')
         if not roots or not expected or not set(roots) <= set(expected):

@@ -3,8 +3,11 @@
 `main` (or the configured source branch) accepts development changes. `tested`
 advances only after the entire explicit native inventory and flake checks build,
 upload, and pass independent remote NAR content and signature verification.
-Each target closure is policy checked and uploaded as soon as it builds, so an
-interrupted run can reuse completed outputs. These partial cache entries do not
+Each target closure is policy checked and uploaded as soon as it builds. Valid
+locally built or custom-cache outputs from its recursive derivation graph are
+also published, including fixed-output/vendor dependencies and completed work
+after a later build failure. Official-upstream-signed substitutes are filtered
+using local metadata; this is not an independent upstream availability proof. These partial cache entries do not
 advance a channel; promotion still waits for the full inventory, native checks,
 and independent verification.
 `stable` is an owner-dispatched selection of an immutable `tested-<commit>` tag;
@@ -12,16 +15,19 @@ it repeats builds/checks/cache verification. Flakes continue to lock exact commi
 Failed, skipped or missing platforms never advance a channel. Promotion uses
 non-forced atomic pushes; release tags are immutable. No host activation occurs.
 `excludedSystems` records intentional exclusions from that guarantee. Private
-repositories exclude Darwin; their Darwin outputs remain available for manual
-use without claiming a successful Darwin build/cache gate. Darwin-only private
-tools have monitoring/input updates but no automatic tested/stable channel.
+Darwin outputs use the on-prem native Forgejo runner and its immutable host
+admission check before new package/check builds. An explicitly configured ARM
+Mac may provide Intel Darwin compatibility only with Nix extra-platforms and
+working Rosetta; other platform mismatches are rejected. Missing runner capacity
+or an incomplete platform never counts as successful release/cache coverage.
 
 The daily full run also verifies the advertised tested/stable revisions and the
 three newest tags per channel against their original build proofs, without
-source builds. NAR reads refresh Attic's last-access retention window. Historical
-helper code is never executed. No release/cache objects are deleted by this
-automation. Older tags remain immutable source selections, but only this bounded
-recovery set is actively kept warm; cache uptime is still monitored separately.
+source builds. These reads prove availability and integrity; they do not replace
+the cache server's retention policy. Historical helper code is never executed.
+No release/cache objects are deleted by this automation. Older tags remain
+immutable source selections, but only this bounded recovery set is actively
+rechecked; cache uptime is still monitored separately.
 
 Every six hours, the updater resolves `tracking-inputs.json`, uses Nix to write
 the lock, pins Git sources exactly in flake.nix, evaluates, and opens a review PR.
@@ -37,10 +43,12 @@ Required repository configuration:
 - Forgejo requires repository-scoped `FLAKEY_NIKS3_READ_NETRC` and
   `FLAKEY_NIKS3_WRITE_TOKEN`. Niks3 is its substitute and verified release cache;
   existing Attic secrets and historical objects remain.
-- GitHub requires no Niks3 static secrets: trusted publishers request write-only
-  OIDC with audience `https://niks3.monke.fail`. Both cache uploads gate releases.
-- GitHub: supply a repository-scoped `ATTIC_TOKEN` (or `FLAKEY_ATTIC_TOKEN`) with pull/push
-  access to the existing `flakey` cache. No private Forgejo inputs go to GitHub.
+- GitHub requires no Niks3 static secrets: trusted publishers request a write grant through
+  OIDC with audience `https://niks3.monke.fail`. Trusted readers use the separate
+  read-only audience `https://niks3.monke.fail/read` and `/oidc` cache object route,
+  refreshing the job-local netrc until cleanup. PR events receive no private
+  reader. Niks3 upload and signed remote verification gate releases. No private
+  Forgejo source credentials or inputs go to GitHub.
 - `inputCheckWorkflows` lists reviewed GitHub native workflows with workflow_dispatch.
   The updater explicitly dispatches them on the immutable update branch, including
   when using GITHUB_TOKEN. Each workflow must keep cache publication and secrets

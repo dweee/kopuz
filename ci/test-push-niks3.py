@@ -40,6 +40,26 @@ class Publication(unittest.TestCase):
         with patch.dict(os.environ,env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')) as run:
             publisher.publish(self.manifest)
         self.assertIn('--auth-token-script',run.call_args.args[0]);self.assertNotIn('--auth-token-path',run.call_args.args[0])
+
+    def test_ci_alias_chain_preserves_the_store_output_leaf(self):
+        alias=self.root/'result';middle=self.root/'intermediate'
+        alias.symlink_to('intermediate');middle.symlink_to(self.path)
+        self.manifest.write_text(str(alias)+'\n'+self.path+'\n')
+        with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')) as call:
+            publisher.publish(self.manifest)
+        self.assertEqual(call.call_args.args[0][-1],self.path)
+        self.assertEqual(call.call_args.args[0].count(self.path),1)
+
+    def test_store_output_symlink_is_not_dereferenced(self):
+        # Real store roots are immutable in tests. Fail if any attempt resolves
+        # this leaf, while outer result aliases may still be resolved.
+        with patch.object(Path,'resolve',side_effect=AssertionError('store leaf dereferenced')):
+            self.assertEqual(publisher.store_output_path(self.path),self.path)
+
+    def test_cycles_and_store_subpaths_are_rejected(self):
+        alias=self.root/'cycle';alias.symlink_to('cycle')
+        for path in [str(alias),self.path+'/bin/tool',self.path+'.drv','/nix/store',str(self.root/'missing')]:
+            with self.subTest(path=path),self.assertRaises(ValueError):publisher.store_output_path(path)
     def test_github_pr_or_private_credentials_fail_closed(self):
         for extra in [{'GITHUB_EVENT_NAME':'pull_request'},{'GITHUB_EVENT_NAME':'push','NIKS3_READ_NETRC':'fixture'}]:
             env=self.env|{'GITHUB_SERVER_URL':'https://github.com'}|extra
@@ -48,13 +68,36 @@ class Publication(unittest.TestCase):
                 run.assert_not_called()
     def test_failure_never_succeeds(self):
         with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],1,'','denied')):
-            with self.assertRaises(subprocess.CalledProcessError):publisher.publish(self.manifest)
+            with self.assertRaises(publisher.PublicationFailure):publisher.publish(self.manifest)
     def test_bad_manifest_or_destination_never_runs(self):
         for text in ['',self.path+'.drv\n','/tmp/arbitrary\n']:
             self.manifest.write_text(text)
             with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run') as run:
                 with self.assertRaises(ValueError):publisher.publish(self.manifest)
                 run.assert_not_called()
+    def test_diagnostics_classify_without_exposing_credentials(self):
+        for message, category, retry in [
+            ('Unauthorized bearer synthetic-secret', 'authentication-rejected', False),
+            ('hash mismatch presigned-url', 'integrity-mismatch', False),
+            ('HTTP 503 ServiceUnavailable', 'service-unavailable', True),
+            ('connection reset token=synthetic-secret', 'transport', True),
+            ('unknown error token=synthetic-secret', 'publisher-rejected', False),
+        ]:
+            self.assertEqual(publisher.failure_category(message), (category, retry))
+
+    def test_repository_dispatch_uses_oidc_publisher_without_static_secret(self):
+        env = {k: v for k, v in self.env.items() if k != 'NIKS3_WRITE_TOKEN'}
+        env.update(GITHUB_SERVER_URL='https://github.com', GITHUB_EVENT_NAME='repository_dispatch')
+        with patch.dict(os.environ, env, clear=True), patch.object(publisher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as call:
+            publisher.publish(self.manifest)
+        self.assertIn('--auth-token-script', call.call_args.args[0])
+        self.assertNotIn('--auth-token-path', call.call_args.args[0])
+
+    def test_missing_optional_summary_does_not_relabel_success(self):
+        env=self.env|{'GITHUB_STEP_SUMMARY':str(self.root/'absent/summary')}
+        with patch.dict(os.environ,env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')):
+            publisher.publish(self.manifest)
+
     def test_oidc_json_protocol_and_audience(self):
         mod=load('niks3-oidc-token'); import base64
         value='header.'+base64.urlsafe_b64encode(json.dumps({'exp':2000000000}).encode()).decode().rstrip('=')+'.signature'

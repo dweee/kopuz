@@ -6,7 +6,7 @@
   "test-update-automation.py": "8a9e38325ad59a2496130cb1e9a60cb271bca103645d49596508547d286e9069",
   "automation-forge.py": "c0c6102e0d73a0bfd9cd25bed4555127bb5331f37d2ce48ad9956e7565a2731c",
   "configure-attic-read.py": "4b663ae0e073327dbcdcdaabef23a58a0a241f2f0fcfe3fd5f351b9242cbf669",
-  "configure-niks3.py": "344f8465ab92c8c3276aeae631ff8902c074b050d15085b9296ad961c3af9a83",
+  "configure-niks3.py": "f1690b26b7e2762c083f34c8473d19873de9958ef376a78be46006b1073d4dc8",
   "push-niks3.py": "b97bbcb63a5d305a4062196e1f52b0912b1a88e735731407bbcbaab39a8b466b",
   "test-push-niks3.py": "a94920042ed3eb03f2a6d970f494de93237658632d7712227e60cfc89492aec2",
   "niks3-oidc-token.py": "58569dc6c6d05232300aae7d03848c66f8678f832d51a1a5326f034da41b2e5f",

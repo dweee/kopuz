@@ -93,7 +93,7 @@ def configure(oidc=False):
         raise ValueError('Invalid read credential')
     config = directory/'nix.conf'
     read_url = 'https://niks3.monke.fail' + ('/oidc' if oidc else '')
-    config.write_text('experimental-features = nix-command flakes\naccept-flake-config = false\n'
+    config.write_text('extra-experimental-features = nix-command flakes\naccept-flake-config = false\n'
                      'extra-substituters = '+read_url+'\n'
                      # Large Niks3 NARs repeatedly failed with HTTP/2 stream framing errors.
                      'http2 = false\nalways-allow-substitutes = true\nextra-trusted-public-keys = '+KEY+'\n'
@@ -103,7 +103,9 @@ def configure(oidc=False):
         values['NIKS3_READ_AUTH'] = 'github-oidc'
     previous = os.environ.get('NIX_USER_CONF_FILES', str(Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home()/'.config')))/'nix/nix.conf'))
     configs=[p for p in previous.split(':') if p and p != str(config)]
-    values['NIX_USER_CONF_FILES']=':'.join([*configs,str(config)])
+    # Nix loads this list in reverse order. Keep the job reader first so an
+    # existing user config cannot replace its netrc or cache settings.
+    values['NIX_USER_CONF_FILES']=':'.join([str(config),*configs])
     token=os.environ.get('NIKS3_WRITE_TOKEN')
     if token:
         if not re.fullmatch(r'[A-Za-z0-9_-]{48,128}',token):

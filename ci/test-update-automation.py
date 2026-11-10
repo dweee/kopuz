@@ -154,17 +154,6 @@ class FailureDiagnostics(unittest.TestCase):
         self.assertIn('validate-candidate: command deadline exceeded', error.getvalue())
         self.assertNotIn(secret, output.getvalue()+error.getvalue())
 
-    def test_existing_input_branch_is_reused_and_other_errors_propagate(self):
-        rules = {'forge': 'forgejo'}
-        with patch.object(a, 'api', return_value={'name': 'b'}) as call:
-            self.assertTrue(a.branch_exists(rules, '/repos/o/r', 'automation/input-updates-ab'))
-        self.assertEqual(call.call_args.args[2], '/repos/o/r/branches/automation/input-updates-ab')
-        with patch.object(a, 'api', side_effect=HTTPError('u', 404, 'm', None, None)):
-            self.assertFalse(a.branch_exists(rules, '/repos/o/r', 'x'))
-        with patch.object(a, 'api', side_effect=HTTPError('u', 403, 'm', None, None)):
-            with self.assertRaises(HTTPError):
-                a.branch_exists(rules, '/repos/o/r', 'x')
-
     def test_publication_reports_http_permission_failure_without_credentialed_url(self):
         secret = 'fixture-sensitive-writer-value'
         def publish(rules):
@@ -309,6 +298,179 @@ class RealInputMovement(unittest.TestCase):
             locked = u.root_node(json.loads((consumer/'flake.lock').read_text()), 'dep')
             self.assertEqual(locked['locked']['rev'], new)
             self.assertEqual(locked['original']['rev'], new)
+
+
+
+def git(cwd, *args):
+    return subprocess.run(['git', *args], cwd=cwd, text=True, capture_output=True, check=True,
+                          env=dict(a.os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
+                                   GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')).stdout.strip()
+
+
+class FakeForge:
+    """The few Forgejo/GitHub API calls the input publisher makes, with call records."""
+    def __init__(self, repository='o/r'):
+        self.repository, self.prs, self.calls, self.status, self.merge_error = repository, [], [], 'success', None
+
+    def pr(self, number, ref, files=('flake.lock',)):
+        value = {'number': number, 'body': a.INPUT_MARKER, 'base': {'ref': 'main'}, 'files': list(files),
+                 'head': {'ref': ref, 'repo': {'full_name': self.repository}}}
+        self.prs.append(value)
+        return value
+
+    def __call__(self, rules, method, endpoint, data=None):
+        self.calls.append((method, endpoint, data))
+        prefix = '/repos/' + self.repository
+        if method == 'GET' and endpoint == '/user':
+            return {'login': 'flakey-updater'}
+        if method == 'GET' and endpoint.startswith(prefix + '/pulls?'):
+            return [p for p in self.prs if p.get('state') != 'closed']
+        if method == 'POST' and endpoint == prefix + '/pulls':
+            return self.pr(100 + len(self.prs), data['head'])
+        if method == 'GET' and endpoint.startswith(prefix + '/commits/'):
+            return {'state': self.status}
+        if method == 'POST' and endpoint.endswith('/merge'):
+            if self.merge_error:
+                raise HTTPError('u', self.merge_error, 'm', None, None)
+            return None
+        if method == 'GET' and endpoint.endswith('/files?limit=100&per_page=100'):
+            number = int(endpoint.split('/pulls/')[1].split('/')[0])
+            return [{'filename': f} for p in self.prs if p['number'] == number for f in p['files']]
+        if method == 'PATCH':
+            number = int(endpoint.rsplit('/', 1)[1])
+            next(p for p in self.prs if p['number'] == number)['state'] = data['state']
+            return None
+        if method == 'GET' and '/actions/workflows/' in endpoint:
+            return {'workflow_runs': []}
+        if method == 'POST' and endpoint.endswith('/dispatches'):
+            return None
+        raise AssertionError('unexpected API call ' + method + ' ' + endpoint)
+
+    def made(self, method, suffix):
+        return [c for c in self.calls if c[0] == method and c[1].endswith(suffix)]
+
+
+class InputUpdatePR(unittest.TestCase):
+    """One update branch and PR per repository, moved forward in place without force."""
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        self.origin, self.work = root / 'origin.git', root / 'work'
+        git(root, 'init', '-q', '--bare', '-b', 'main', str(self.origin))
+        git(root, 'clone', '-q', str(self.origin), str(self.work))
+        (self.work / 'flake.nix').write_text('{ }\n')
+        (self.work / 'flake.lock').write_text('{"pin": 0}\n')
+        (self.work / 'README').write_text('fixture\n')
+        git(self.work, 'add', '-A')
+        git(self.work, 'commit', '-qm', 'base')
+        git(self.work, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.forge = FakeForge()
+        self.rules = {'forge': 'forgejo', 'repository': 'o/r', 'branch': 'main', 'remote': str(self.origin)}
+
+    def land_on_main(self, name, text):
+        git(self.work, 'fetch', '-q', 'origin', 'main')
+        git(self.work, 'reset', '-q', '--hard', 'FETCH_HEAD')
+        (self.work / name).write_text(text)
+        git(self.work, 'commit', '-qam', 'landed ' + name)
+        git(self.work, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+
+    def publish(self, pin, **rules):
+        """Resolve new pins on the current main, as the scheduled job does, and publish them."""
+        git(self.work, 'fetch', '-q', 'origin', 'main')
+        git(self.work, 'reset', '-q', '--hard', 'FETCH_HEAD')
+        (self.work / 'flake.lock').write_text('{"pin": ' + str(pin) + '}\n')
+        output = io.StringIO()
+        with patch.object(a, 'api', self.forge), patch.object(a.channel, 'ROOT', self.work), \
+                patch.dict(a.os.environ, {'AUTOMATION_TOKEN': 'fixture-token'}), redirect_stdout(output):
+            a.inputs(dict(self.rules, **rules))
+        return output.getvalue()
+
+    def branch(self):
+        return git(self.origin, 'rev-parse', 'refs/heads/' + a.INPUT_BRANCH)
+
+    def proposal(self, revision):
+        main = git(self.origin, 'rev-parse', 'refs/heads/main')
+        return (git(self.origin, 'diff', '--name-only', main, revision),
+                git(self.origin, 'show', revision + ':flake.lock'))
+
+    def test_first_run_opens_one_pr_that_merges_itself_when_green(self):
+        self.publish(1)
+        self.assertEqual(self.proposal(self.branch()), ('flake.lock', '{"pin": 1}'))
+        created = self.forge.made('POST', '/pulls')
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0][2]['head'], a.INPUT_BRANCH)
+        self.assertEqual(self.forge.made('POST', '/merge')[0][2],
+                         {'Do': 'squash', 'merge_when_checks_succeed': True, 'delete_branch_after_merge': True})
+
+    def test_new_pins_update_the_same_pr_on_the_moved_main_without_force(self):
+        self.publish(1)
+        first = self.branch()
+        self.land_on_main('README', 'moved\n')
+        self.publish(2)
+        second = self.branch()
+        self.assertEqual(len(self.forge.made('POST', '/pulls')), 1)
+        # A fast-forward of the old branch head, so a plain push succeeded.
+        git(self.origin, 'merge-base', '--is-ancestor', first, second)
+        self.assertEqual(self.proposal(second), ('flake.lock', '{"pin": 2}'))
+        self.assertEqual(git(self.origin, 'show', second + ':README'), 'moved')
+
+    def test_unchanged_pins_push_nothing(self):
+        self.publish(1)
+        first = self.branch()
+        output = self.publish(1)
+        self.assertIn('already proposes these pins', output)
+        self.assertEqual(self.branch(), first)
+        self.assertEqual(len(self.forge.made('POST', '/pulls')), 1)
+
+    def test_running_checks_are_not_restarted_until_they_have_waited_too_long(self):
+        self.publish(1)
+        first = self.branch()
+        self.forge.status = 'pending'
+        self.assertIn('to finish its checks', self.publish(2))
+        self.assertEqual(self.branch(), first)
+        later = a.time.time() + a.PENDING_GRACE_SECONDS + 60
+        with patch.object(a.time, 'time', return_value=later):
+            self.publish(2)
+        self.assertNotEqual(self.branch(), first)
+        self.assertEqual(self.proposal(self.branch()), ('flake.lock', '{"pin": 2}'))
+
+    def test_a_merged_and_deleted_branch_starts_a_fresh_pr_from_main(self):
+        self.publish(1)
+        self.forge.prs[0]['state'] = 'closed'
+        git(self.origin, 'update-ref', '-d', 'refs/heads/' + a.INPUT_BRANCH)
+        self.land_on_main('flake.lock', '{"pin": 1}\n')
+        self.publish(2)
+        main = git(self.origin, 'rev-parse', 'refs/heads/main')
+        self.assertEqual(git(self.origin, 'rev-parse', self.branch() + '^@'), main)
+        self.assertEqual(len(self.forge.made('POST', '/pulls')), 2)
+
+    def test_legacy_hash_named_prs_are_closed_unless_they_carry_other_changes(self):
+        pins_only = self.forge.pr(7, a.LEGACY_INPUT_PREFIX + 'aaaaaaaaaaaaaaaa')
+        fixed = self.forge.pr(8, a.LEGACY_INPUT_PREFIX + 'bbbbbbbbbbbbbbbb', files=('flake.lock', 'pkgs/fix.nix'))
+        unrelated = self.forge.pr(9, 'feature/other')
+        unrelated['body'] = 'unrelated'
+        self.publish(1)
+        self.assertEqual(pins_only.get('state'), 'closed')
+        self.assertNotIn('state', fixed)
+        self.assertNotIn('state', unrelated)
+
+    def test_merge_scheduling_tolerates_already_scheduled_and_disallowed(self):
+        self.forge.merge_error = 409
+        self.publish(1)
+        self.forge.merge_error = 405
+        self.assertIn('awaits review', self.publish(2))
+
+    def test_auto_merge_can_be_disabled_and_github_dispatches_checks_for_the_new_head(self):
+        self.publish(1, inputAutoMerge=False)
+        self.assertEqual(self.forge.made('POST', '/merge'), [])
+        self.forge = FakeForge()
+        with patch.object(a, 'attribution', return_value=''):
+            self.publish(2, forge='github')
+        self.assertEqual(self.forge.made('POST', '/merge'), [])
+        runs = [c for c in self.forge.calls if '/actions/workflows/pr-checks.yml/runs?head_sha=' + self.branch() in c[1]]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(self.forge.made('POST', '/dispatches')[0][2], {'ref': a.INPUT_BRANCH})
 
 
 if __name__ == '__main__': unittest.main()

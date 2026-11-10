@@ -30,7 +30,10 @@ immutable source selections, but only this bounded recovery set is actively
 rechecked; cache uptime is still monitored separately.
 
 Every six hours, the updater resolves `tracking-inputs.json`, uses Nix to write
-the lock, pins Git sources exactly in flake.nix, evaluates, and opens a review PR.
+the lock, pins Git sources exactly in flake.nix and evaluates. Changed pins go
+to one `automation/input-updates` branch and PR per repository, updated in place.
+On Forgejo that PR squash-merges itself once the required checks pass
+(`"inputAutoMerge": false` in channels.json turns this off).
 The manual-version monitor maintains one issue with candidates, failed checks,
 and unclassified files. Dynamic/unrecognized sources require manual review.
 This is monitoring, not blind rewriting of coordinated dependency hashes.
@@ -50,14 +53,16 @@ Required repository configuration:
   reader. Niks3 upload and signed remote verification gate releases. No private
   Forgejo source credentials or inputs go to GitHub.
 - `inputCheckWorkflows` lists reviewed GitHub native workflows with workflow_dispatch.
-  The updater explicitly dispatches them on the immutable update branch, including
+  The updater explicitly dispatches them on the update branch head, including
   when using GITHUB_TOKEN. Each workflow must keep cache publication and secrets
   restricted to the trusted source branch. The updater requires Actions write.
 - Optional `UPDATE_TOKEN` is a repository-scoped app/PAT; default GITHUB_TOKEN
   PRs do not emit further pull_request workflow events.
-- A new update candidate supersedes older marked input-only PRs for the same
-  target branch after check dispatch succeeds. Branches are immutable and never
-  force-pushed; candidates containing source fixes are preserved for review.
+- Each update is a commit of the current target branch plus the new pins, with
+  the previous update head as a parent, so the branch only moves forward and is
+  never force-pushed. A candidate whose checks are still pending is left to
+  finish for up to 12 hours. Older hash-named input-only PRs are closed;
+  candidates containing source fixes are preserved for review.
 - Optional `CHANNEL_TOKEN` can identify a separate protected-branch publisher.
 - Forgejo requires the existing native `nix` and native aarch64 Linux runners. Flakey
   and private inputs never go to GitHub. Already-public GitHub owning repos may

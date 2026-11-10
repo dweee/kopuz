@@ -170,14 +170,105 @@ def dispatch_input_checks(rules, prefix, pr):
             print('PR checks workflow cannot be dispatched; update the installed automation')
 
 
-def consolidate_input_prs(rules, prefix, prs, current):
+def open_input_prs(rules, prefix):
+    result, seen, page = [], set(), 1
+    while True:
+        batch = api(rules, 'GET', prefix + '/pulls?state=open&limit=100&per_page=100&page=' + str(page))
+        if (not isinstance(batch, list) or len({p['number'] for p in batch}) != len(batch)
+                or any(p['number'] in seen for p in batch)):
+            raise ValueError('Incomplete open PR pagination')
+        result.extend(batch)
+        seen.update(p['number'] for p in batch)
+        if len(batch) < 100:
+            return result
+        page += 1
+
+
+def input_branch_is_pin_only(base, head):
+    """Check the complete branch diff, including code within flake.nix."""
+    ancestor = channel.run('git', 'merge-base', base, head)
+    names = channel.run('git', 'diff', '--no-renames', '--name-only', ancestor, head).splitlines()
+    if any(name not in INPUT_FILES for name in names):
+        return False
+    def contents(revision, path):
+        result = subprocess.run(['git', 'show', revision + ':' + path], cwd=channel.ROOT,
+                                capture_output=True, check=True)
+        return result.stdout
+    try:
+        if 'flake.nix' in names or 'nix/forks.json' in names:
+            policy = json.loads(contents(ancestor, 'ci/tracking-inputs.json'))
+        if 'flake.nix' in names:
+            spec = importlib.util.spec_from_file_location('pin_updater', Path(__file__).with_name('update-inputs.py'))
+            updater = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(updater)
+            def normalized(revision):
+                text = contents(revision, 'flake.nix').decode('utf-8')
+                for name in sorted(policy['inputs']):
+                    match = updater.url_match(text, name)
+                    if any(marker in match.group(1) for marker in ('${', '\\', '\n', '\r')):
+                        raise ValueError('Preserving nonliteral input URL')
+                    text = text[:match.start(1)] + '<tracked-pin>' + text[match.end(1):]
+                return text
+            if normalized(ancestor) != normalized(head):
+                return False
+        if 'flake.lock' in names:
+            json.loads(contents(head, 'flake.lock'))
+        if 'nix/forks.json' in names:
+            def inventory(revision):
+                records = json.loads(contents(revision, 'nix/forks.json'))
+                for name, record in records.items():
+                    if name in policy['inputs'] and 'revision' in record:
+                        record['revision'] = '<tracked-pin>'
+                return records
+            if inventory(ancestor) != inventory(head):
+                return False
+    except (channel.CommandFailure, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+        return False
+    return True
+
+
+def consolidate_input_prs(rules, prefix, prs, current, replacement_head):
     for pr in prs:
         if pr['number'] == current['number'] or not input_pr(rules, pr):
             continue
+        old_head = pr.get('head', {}).get('sha', '')
+        if not re.fullmatch(r'[a-f0-9]{40}', old_head):
+            continue
         files = api(rules, 'GET', prefix + '/pulls/' + str(pr['number']) + '/files?limit=100&per_page=100')
-        # Preserve candidates with manual source fixes or an incomplete file list.
-        if not files or len(files) >= 100 or any(f['filename'] not in INPUT_FILES for f in files):
+        if not files or len(files) >= 100 or any(f['filename'] not in INPUT_FILES or f.get('previous_filename')
+                                                    or f.get('status') in ('renamed', 'removed') for f in files):
             print('Preserving update PR with additional changes: ' + str(pr['number']))
+            continue
+        equivalent = True
+        for file in files:
+            try:
+                old = api(rules, 'GET', prefix + '/contents/' + file['filename'] + '?ref=' + old_head)
+                new = api(rules, 'GET', prefix + '/contents/' + file['filename'] + '?ref=' + replacement_head)
+            except HTTPError as error:
+                if error.code != 404:
+                    raise
+                error.close()
+                equivalent = False
+                break
+            if (not isinstance(old, dict) or not isinstance(new, dict)
+                    or old.get('type') != 'file' or new.get('type') != 'file'
+                    or not re.fullmatch(r'[a-f0-9]{40}', old.get('sha', ''))
+                    or old['sha'] != new.get('sha')):
+                equivalent = False
+                break
+        if not equivalent:
+            print('Preserving update PR whose pins are not proven in the replacement: ' + str(pr['number']))
+            continue
+        live = api(rules, 'GET', prefix + '/pulls/' + str(pr['number']))
+        if (live.get('state') != 'open' or not input_pr(rules, live)
+                or live.get('head', {}).get('sha') != old_head
+                or live.get('base', {}).get('sha') != pr.get('base', {}).get('sha')):
+            print('Preserving update PR that changed during verification: ' + str(pr['number']))
+            continue
+        replacement = api(rules, 'GET', prefix + '/pulls/' + str(current['number']))
+        if (replacement.get('state') != 'open' or not input_pr(rules, replacement)
+                or replacement.get('head', {}).get('sha') != replacement_head):
+            print('Preserving update PR because its replacement changed: ' + str(pr['number']))
             continue
         phase('close-superseded-input-pr')
         api(rules, 'PATCH', prefix + '/pulls/' + str(pr['number']), {'state': 'closed'})
@@ -245,12 +336,19 @@ def inputs(rules):
     base = channel.run('git', 'rev-parse', 'HEAD^{commit}')
     prefix = '/repos/' + rules['repository']
     phase('find-existing-input-pr')
-    prs = api(rules, 'GET', prefix + '/pulls?state=open&limit=100&per_page=100')
+    prs = open_input_prs(rules, prefix)
     current = next((p for p in prs if p.get('head', {}).get('ref') == INPUT_BRANCH and input_pr(rules, p)), None)
     with channel.tempfile.TemporaryDirectory(prefix='input-push-') as directory:
         with channel.build_environment(dict(os.environ, CHANNEL_TOKEN=os.environ['AUTOMATION_TOKEN'])):
             env = channel.git_env(directory)
             head = remote_input_head(rules, env)
+            if head and not input_branch_is_pin_only(base, head):
+                raise ValueError('Preserving input branch with additional or unverified edits')
+            if current:
+                live = api(rules, 'GET', prefix + '/pulls/' + str(current['number']))
+                if (live.get('state') != 'open' or not input_pr(rules, live)
+                        or live.get('head', {}).get('sha') != head):
+                    raise ValueError('Preserving input PR whose head changed during verification')
             if head and proposes_staged_pins(head):
                 print('The update PR already proposes these pins')
             elif current and head and checks_still_running(rules, prefix, head):
@@ -283,7 +381,7 @@ def inputs(rules):
     # The listed PR head predates a push made by this run.
     dispatch_input_checks(rules, prefix, {'head': {'ref': INPUT_BRANCH, 'sha': head}})
     schedule_input_merge(rules, prefix, current)
-    consolidate_input_prs(rules, prefix, prs, current)
+    consolidate_input_prs(rules, prefix, prs, current, head)
 
 
 def main():

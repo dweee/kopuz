@@ -311,10 +311,11 @@ class FakeForge:
     """The few Forgejo/GitHub API calls the input publisher makes, with call records."""
     def __init__(self, repository='o/r'):
         self.repository, self.prs, self.calls, self.status, self.merge_error = repository, [], [], 'success', None
+        self.changed_heads = {}
 
-    def pr(self, number, ref, files=('flake.lock',)):
+    def pr(self, number, ref, files=('flake.lock',), sha=None):
         value = {'number': number, 'body': a.INPUT_MARKER, 'base': {'ref': 'main'}, 'files': list(files),
-                 'head': {'ref': ref, 'repo': {'full_name': self.repository}}}
+                 'head': {'ref': ref, 'sha': sha or format(number, '040x'), 'repo': {'full_name': self.repository}}}
         self.prs.append(value)
         return value
 
@@ -324,7 +325,14 @@ class FakeForge:
         if method == 'GET' and endpoint == '/user':
             return {'login': 'flakey-updater'}
         if method == 'GET' and endpoint.startswith(prefix + '/pulls?'):
-            return [p for p in self.prs if p.get('state') != 'closed']
+            for pr in self.prs:
+                if pr['head']['ref'] == a.INPUT_BRANCH:
+                    try:
+                        pr['head']['sha'] = git(Path(rules['remote']), 'rev-parse', 'refs/heads/' + a.INPUT_BRANCH)
+                    except subprocess.CalledProcessError:
+                        pass
+            page = int(endpoint.rsplit('page=', 1)[1])
+            return [p for p in self.prs if p.get('state') != 'closed'][(page-1)*100:page*100]
         if method == 'POST' and endpoint == prefix + '/pulls':
             return self.pr(100 + len(self.prs), data['head'])
         if method == 'GET' and endpoint.startswith(prefix + '/commits/'):
@@ -335,7 +343,23 @@ class FakeForge:
             return None
         if method == 'GET' and endpoint.endswith('/files?limit=100&per_page=100'):
             number = int(endpoint.split('/pulls/')[1].split('/')[0])
-            return [{'filename': f} for p in self.prs if p['number'] == number for f in p['files']]
+            return [f if isinstance(f, dict) else {'filename': f}
+                    for p in self.prs if p['number'] == number for f in p['files']]
+        if method == 'GET' and '/contents/' in endpoint:
+            path, revision = endpoint.split('/contents/', 1)[1].split('?ref=', 1)
+            try:
+                return {'type': 'file', 'sha': git(a.channel.ROOT, 'rev-parse', revision + ':' + path)}
+            except subprocess.CalledProcessError:
+                raise HTTPError('u', 404, 'missing', None, None)
+        if method == 'GET' and endpoint.startswith(prefix + '/pulls/'):
+            number = int(endpoint.rsplit('/', 1)[1])
+            pr = json.loads(json.dumps(next(p for p in self.prs if p['number'] == number)))
+            pr.setdefault('state', 'open')
+            if pr['head']['ref'] == a.INPUT_BRANCH:
+                pr['head']['sha'] = git(Path(rules['remote']), 'rev-parse', 'refs/heads/' + a.INPUT_BRANCH)
+            if number in self.changed_heads:
+                pr['head']['sha'] = self.changed_heads[number]
+            return pr
         if method == 'PATCH':
             number = int(endpoint.rsplit('/', 1)[1])
             next(p for p in self.prs if p['number'] == number)['state'] = data['state']
@@ -445,15 +469,92 @@ class InputUpdatePR(unittest.TestCase):
         self.assertEqual(git(self.origin, 'rev-parse', self.branch() + '^@'), main)
         self.assertEqual(len(self.forge.made('POST', '/pulls')), 2)
 
-    def test_legacy_hash_named_prs_are_closed_unless_they_carry_other_changes(self):
-        pins_only = self.forge.pr(7, a.LEGACY_INPUT_PREFIX + 'aaaaaaaaaaaaaaaa')
-        fixed = self.forge.pr(8, a.LEGACY_INPUT_PREFIX + 'bbbbbbbbbbbbbbbb', files=('flake.lock', 'pkgs/fix.nix'))
-        unrelated = self.forge.pr(9, 'feature/other')
-        unrelated['body'] = 'unrelated'
+    def test_legacy_input_only_prs_are_preserved_without_matching_pins(self):
+        base = git(self.work, 'rev-parse', 'HEAD')
+        pins_only = self.forge.pr(7, a.LEGACY_INPUT_PREFIX + 'a'*16, sha=base)
+        fixed = self.forge.pr(8, a.LEGACY_INPUT_PREFIX + 'b'*16, files=('flake.lock', 'pkgs/fix.nix'))
         self.publish(1)
-        self.assertEqual(pins_only.get('state'), 'closed')
+        self.assertNotIn('state', pins_only)
         self.assertNotIn('state', fixed)
-        self.assertNotIn('state', unrelated)
+
+    def test_equivalent_legacy_pins_can_close_after_fresh_head_verification(self):
+        self.publish(1)
+        old = self.forge.pr(7, a.LEGACY_INPUT_PREFIX + 'a'*16, sha=self.branch())
+        self.publish(1)
+        self.assertEqual(old.get('state'), 'closed')
+
+    def test_missing_old_contents_and_changed_heads_are_preserved(self):
+        self.publish(1)
+        missing = self.forge.pr(7, a.LEGACY_INPUT_PREFIX + 'a'*16)
+        changed = self.forge.pr(8, a.LEGACY_INPUT_PREFIX + 'b'*16, sha=self.branch())
+        self.forge.changed_heads[8] = 'f'*40
+        self.publish(1)
+        self.assertNotIn('state', missing)
+        self.assertNotIn('state', changed)
+
+    def test_all_open_pr_pages_are_read_before_creating_a_pr(self):
+        self.publish(1)
+        current = self.forge.prs.pop()
+        for number in range(200, 300):
+            self.forge.pr(number, 'feature/' + str(number))
+        self.forge.prs.append(current)
+        self.publish(2)
+        self.assertEqual(len(self.forge.made('POST', '/pulls')), 1)
+        self.assertTrue(any('page=2' in call[1] for call in self.forge.calls))
+
+    def test_flake_url_only_changes_are_recognized_without_masking_code_or_whitespace(self):
+        text = '{ inputs.dep.url = "github:o/dep/old"; outputs = _: { value = 1; }; }\n'
+        (self.work / 'flake.nix').write_text(text)
+        (self.work / 'ci').mkdir()
+        (self.work / 'ci/tracking-inputs.json').write_text('{"inputs":{"dep":{}}}')
+        git(self.work, 'add', 'flake.nix', 'ci/tracking-inputs.json')
+        git(self.work, 'commit', '-qm', 'tracked input fixture')
+        base = git(self.work, 'rev-parse', 'HEAD')
+        for change, expected in [(text.replace('/old', '/new'), True),
+                                 (text.replace('value = 1', 'value = 2'), False),
+                                 (text + '\n', False),
+                                 (text.replace('/old', '/${revision}'), False),
+                                 (text.replace('/old', '/\\${revision}'), False)]:
+            (self.work / 'flake.nix').write_text(change)
+            git(self.work, 'commit', '-qam', 'candidate change')
+            head = git(self.work, 'rev-parse', 'HEAD')
+            with patch.object(a.channel, 'ROOT', self.work):
+                self.assertEqual(a.input_branch_is_pin_only(base, head), expected)
+
+    def test_legacy_rename_does_not_hide_an_unproved_source_deletion(self):
+        self.publish(1)
+        old = self.forge.pr(7, a.LEGACY_INPUT_PREFIX + 'a'*16, sha=self.branch(),
+                            files=({'filename': 'flake.lock', 'previous_filename': 'settings.json',
+                                    'status': 'renamed'},))
+        self.publish(1)
+        self.assertNotIn('state', old)
+
+    def test_changed_replacement_head_cannot_authorize_legacy_closure(self):
+        self.publish(1)
+        current = self.forge.prs[0]
+        head = self.branch()
+        old = self.forge.pr(7, a.LEGACY_INPUT_PREFIX + 'a'*16, sha=head)
+        self.forge.changed_heads[current['number']] = 'f'*40
+        with patch.object(a, 'api', self.forge), patch.object(a.channel, 'ROOT', self.work):
+            a.consolidate_input_prs(self.rules, '/repos/o/r', [old], current, head)
+        self.assertNotIn('state', old)
+
+    def test_manual_source_edits_on_the_update_branch_are_not_removed(self):
+        for filename, text in [('README', 'manual fix'), ('flake.nix', '{ outputs = _: {}; }')]:
+            with self.subTest(filename=filename):
+                self.publish(1)
+                head = self.branch()
+                git(self.work, 'checkout', '-q', '--detach', head)
+                (self.work / filename).write_text(text)
+                git(self.work, 'commit', '-qam', 'manual source fix')
+                fixed = git(self.work, 'rev-parse', 'HEAD')
+                git(self.work, 'push', '-q', 'origin', 'HEAD:refs/heads/' + a.INPUT_BRANCH)
+                with self.assertRaisesRegex(ValueError, 'additional or unverified edits'):
+                    self.publish(2)
+                self.assertEqual(self.branch(), fixed)
+                # A separate fixture is needed for the next manual edit case.
+                git(self.origin, 'update-ref', '-d', 'refs/heads/' + a.INPUT_BRANCH)
+                self.forge.prs.clear()
 
     def test_merge_scheduling_tolerates_already_scheduled_and_disallowed(self):
         self.forge.merge_error = 409

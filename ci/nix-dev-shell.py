@@ -43,6 +43,13 @@ def normalize(raw, output=None):
                 source, destination = mapping.split("=", 1)
                 if source in maps and maps[source] != destination:
                     raise ValueError("conflicting macro prefix maps")
+                # GCC prefix maps use the last matching rule. Even an identical
+                # repeated rule cannot move across an overlapping source prefix.
+                if any(
+                    source != prior and (source.startswith(prior) or prior.startswith(source))
+                    for prior in maps
+                ):
+                    raise ValueError("overlapping macro prefix maps")
                 maps[source] = destination
             elif token.startswith("-frandom-seed="):
                 seeds.add(token)

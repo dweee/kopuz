@@ -27,6 +27,12 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(shlex.split(value), ["-frandom-seed=abc", "-fmacro-prefix-map=/nix/store/a=/nix/store/e"])
         self.assertEqual((before, after), (4, 2))
 
+    def test_overlapping_macro_prefixes_fail_before_deduplication(self):
+        for first, second in [("/nix/store/a", "/nix/store/a/sub"), ("/nix/store/a/sub", "/nix/store/a"), ("/nix/store/a", "/nix/store/ab")]:
+            raw = f"-fmacro-prefix-map={first}=x -fmacro-prefix-map={second}=y -fmacro-prefix-map={first}=x"
+            with self.subTest(first=first, second=second), self.assertRaises(ValueError):
+                helper.normalize(raw)
+
     def test_shell_output_rpath_is_allowed_only_as_declared(self):
         self.assertEqual(helper.normalize("-rpath /tmp/dev/outputs/out/lib", "/tmp/dev/outputs/out")[1:], (1, 1))
         with self.assertRaises(ValueError):

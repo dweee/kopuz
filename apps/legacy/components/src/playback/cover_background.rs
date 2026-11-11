@@ -1,0 +1,41 @@
+use config::Settings;
+use dioxus::prelude::*;
+
+/// Art backdrop: the cover under user-configurable blur and a scrim so text
+/// stays readable. The scrim is the theme's base colour, not black, because a
+/// light theme draws `text-white` dark. The overscan grows with the blur
+/// radius to keep blurred edge bleed outside the viewport.
+#[component]
+pub fn CoverArtBackground(cover: String) -> Element {
+    let settings = use_context::<Signal<Settings>>();
+    let (scrim, blur) = {
+        let conf = settings.read();
+        (
+            conf.background.cover_art_darkening.min(95),
+            conf.background.cover_art_blur.min(100),
+        )
+    };
+    let img_style = if blur > 0 {
+        let scale = 1.0 + blur as f32 * 0.004;
+        format!("filter: blur({blur}px); transform: scale({scale});")
+    } else {
+        "filter: none; transform: none;".to_string()
+    };
+
+    let src = hooks::artwork::at_full_size(&cover);
+
+    rsx! {
+        div {
+            class: "absolute inset-0 -z-10 overflow-hidden pointer-events-none bg-black",
+            img {
+                src: "{src}",
+                class: "w-full h-full object-cover",
+                style: "{img_style}",
+            }
+            div {
+                class: "absolute inset-0",
+                style: "background-color: color-mix(in srgb, var(--color-black) {scrim}%, transparent);",
+            }
+        }
+    }
+}

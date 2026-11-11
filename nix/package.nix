@@ -5,13 +5,14 @@
   source ? ../.,
   gitRev ? null,
   ...
-}: let
+}:
+let
   # Upstream's recipe from this fork's own tree (it carries upstream history),
   # so evaluation imports no fetched source.
   upstream = pkgs.callPackage ../packaging/nix/crane.nix {
-    inherit craneLib;
+    inherit craneLib gitRev;
   };
-  cargoVendorDir = craneLib.vendorCargoDeps {src = source;};
+  cargoVendorDir = craneLib.vendorCargoDeps { src = source; };
   # CMake build trees retain absolute sandbox paths in inherited Cargo artifacts.
   clearOpusCMakeCache = builtins.readFile ./clear-opus-cmake-cache.sh;
   qobuzTests = upstream.overrideAttrs (old: {
@@ -37,62 +38,117 @@
   });
   compiled = upstream.overrideAttrs (old: {
     inherit cargoVendorDir;
-    version = "0.21.0-qobuz";
+    version = "0.68.0-qobuz";
     src = source;
     preBuild = (old.preBuild or "") + clearOpusCMakeCache;
     __intentionallyOverridingVersion = true;
-    KOPUZ_GIT_COMMIT =
-      if gitRev == null
-      then "qobuz-fork"
-      else gitRev;
-    nativeBuildInputs = old.nativeBuildInputs ++ [pkgs.makeWrapper];
+    KOPUZ_GIT_COMMIT = if gitRev == null then "qobuz-fork" else gitRev;
+    nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.makeWrapper ];
     # Keep upstream's resource-directory wrapper and include the existing external
     # YouTube downloader in both GUI and daemon PATHs. Pin the dlopen path so
     # libraries inherited from a host app cannot override Nix glibc/libm.
     preFixup =
       builtins.replaceStrings
-      [(lib.makeBinPath [pkgs.ffmpeg]) "--prefix LD_LIBRARY_PATH :" "--prefix PATH :"]
-      [(lib.makeBinPath [pkgs.ffmpeg pkgs.yt-dlp]) "--set LD_LIBRARY_PATH" "--run 'umask 077' --prefix PATH :"]
-      old.preFixup;
+        [
+          (lib.makeBinPath [ pkgs.ffmpeg ])
+          "--prefix LD_LIBRARY_PATH :"
+          "--prefix PATH :"
+        ]
+        [
+          (lib.makeBinPath [
+            pkgs.ffmpeg
+            pkgs.yt-dlp
+          ])
+          "--set LD_LIBRARY_PATH"
+          "--run 'umask 077' --prefix PATH :"
+        ]
+        old.preFixup;
+    # Upstream legacy packaging delegates Linux daemon/CLI to GPUI; this
+    # fork still publishes legacy as its default, so install both here.
+    cargoExtraArgs = "--locked -p kopuz-legacy -p kopuz-ctl -p kopuz-kopuzd";
+    buildPhase =
+      let
+        legacyBuild = "dx build --release --platform desktop -p kopuz-legacy --offline --frozen";
+      in
+      assert lib.hasInfix legacyBuild old.buildPhase;
+      lib.replaceStrings
+        [ legacyBuild ]
+        [
+          (
+            legacyBuild
+            + lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+
+              cargo build --release --offline --frozen -p kopuz-ctl -p kopuz-kopuzd
+            ''
+          )
+        ]
+        old.buildPhase;
     installPhase =
       old.installPhase
+      + lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+        install -m755 target/release/kopuzctl target/release/kopuzd "$out/bin/"
+        ln -s kopuz-legacy "$out/bin/kopuz"
+        install -Dm644 packaging/systemd/kopuzd.service "$out/share/systemd/user/kopuzd.service"
+        substituteInPlace "$out/share/systemd/user/kopuzd.service" \
+          --replace-fail "ExecStart=kopuzd" "ExecStart=$out/bin/kopuzd"
+        mv "$out/bin/kopuzd" "$out/bin/.kopuzd-unwrapped"
+        makeWrapper "$out/bin/.kopuzd-unwrapped" "$out/bin/kopuzd" \
+          --run 'umask 077' \
+          --set LD_LIBRARY_PATH ${
+            lib.makeLibraryPath [
+              pkgs.libcdio
+              pkgs.libcdio-paranoia
+            ]
+          } \
+          --prefix PATH : ${
+            lib.makeBinPath [
+              pkgs.ffmpeg
+              pkgs.yt-dlp
+            ]
+          }
+      ''
       + lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
         mkdir -p "$out/Applications"
-        mv "$out/bin/kopuz.app" "$out/Applications/Kopuz.app"
-        rm "$out/bin/kopuz"
+        mv "$out/bin/kopuz-legacy.app" "$out/Applications/Kopuz.app"
+        rm "$out/bin/kopuz-legacy"
         binary=$(find "$out/Applications/Kopuz.app/Contents/MacOS" -maxdepth 1 -type f -print -quit)
         test -n "$binary"
         makeWrapper "$binary" "$out/bin/kopuz" \
           --run 'umask 077' \
-          --prefix PATH : ${lib.makeBinPath [pkgs.ffmpeg pkgs.yt-dlp]}
+          --prefix PATH : ${
+            lib.makeBinPath [
+              pkgs.ffmpeg
+              pkgs.yt-dlp
+            ]
+          }
       '';
-    passthru =
-      (old.passthru or {})
-      // {
-        qobuzEnabled = true;
-        inherit qobuzTests;
-      };
-    meta =
-      old.meta
-      // {
-        description = "Kopuz with native Qobuz sources, lossless playback and word-synced lyrics";
-        homepage = "https://github.com/dweee/kopuz";
-      };
+    passthru = (old.passthru or { }) // {
+      qobuzEnabled = true;
+      inherit qobuzTests;
+    };
+    meta = old.meta // {
+      description = "Kopuz with native Qobuz sources, lossless playback and word-synced lyrics";
+      homepage = "https://github.com/dweee/kopuz";
+      mainProgram = "kopuz";
+    };
   });
 in
-  pkgs.runCommand compiled.name {
+pkgs.runCommand compiled.name
+  {
     inherit (compiled) pname version meta;
-    nativeBuildInputs = [pkgs.removeReferencesTo];
-    passthru =
-      compiled.passthru
-      // {
-        buildPackage = compiled;
-        inherit (compiled) RUSTY_V8_ARCHIVE;
-      };
+    nativeBuildInputs = [ pkgs.removeReferencesTo ];
+    passthru = compiled.passthru // {
+      buildPackage = compiled;
+      inherit (compiled) RUSTY_V8_ARCHIVE;
+    };
     # Crane's mkCargoDerivation also installs a large target archive. Keep it
     # available for development builds, but exclude it from runtime closures.
-    disallowedReferences = [compiled compiled.cargoVendorDir];
-  } ''
+    disallowedReferences = [
+      compiled
+      compiled.cargoVendorDir
+    ];
+  }
+  ''
     mkdir -p "$out"
     cp -R ${compiled}/bin "$out/bin"
     for directory in share Applications; do
@@ -104,15 +160,18 @@ in
     # Rust panic locations in the CLI retain Cargo's vendor path. These are
     # diagnostics, not runtime assets; avoid retaining the entire source tree.
     find "$out" -type f -exec remove-references-to -t ${compiled.cargoVendorDir} '{}' +
-    substituteInPlace "$out/bin/kopuz" --replace-fail '${compiled}' "$out"
+    substituteInPlace "$out/bin/${
+      if pkgs.stdenv.hostPlatform.isLinux then "kopuz-legacy" else "kopuz"
+    }" \
+      --replace-fail '${compiled}' "$out"
     ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
       substituteInPlace "$out/bin/kopuzd" \
-        "$out/share/applications/moe.kopuz.kopuz.desktop" \
+        "$out/share/applications/moe.kopuz.legacy.desktop" \
         "$out/share/systemd/user/kopuzd.service" \
         --replace-fail '${compiled}' "$out"
       # Preserve an explicitly supplied trust store; otherwise also work on hosts
       # without a conventional /etc/ssl directory.
       sed -i '2i export SSL_CERT_FILE="''${SSL_CERT_FILE:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}"' \
-        "$out/bin/kopuz" "$out/bin/kopuzd"
+        "$out/bin/kopuz-legacy" "$out/bin/kopuzd"
     ''}
   ''

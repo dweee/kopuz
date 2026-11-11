@@ -48,6 +48,20 @@
   </screenshots>
 
   <releases>
+    <release version="0.67.0" date="2026-10-26">
+      <description>
+        <p>
+          Kopuz can play audio CDs and rip them to lossless FLAC with tags and artwork. Streamed songs can be kept in a size-limited offline cache, while offline mode plays downloaded and cached music and pauses online activity. Home now leads with the active service's feed, catalog pages reopen faster, and large album grids load as you scroll. YouTube Music artist pages gain Shuffle and Start Radio, music videos play on Linux, and settings and library controls are easier to use. This release also fixes expired YouTube sessions, source selection, playback highlights and streaming stalls on slow connections.
+        </p>
+      </description>
+    </release>
+    <release version="0.22.0" date="2026-10-20">
+      <description>
+        <p>
+          YouTube Music gains more browsing pages, search filters and suggestions, library and playlist actions, brand account switching, and a Song/Video switch that keeps your place. New playback controls cover streaming quality, autoplay radio, skipping explicit tracks and pausing listening history. Browser sign-in is easier, free-account streams are more reliable, and ListenBrainz can connect through a signed-in browser profile. Settings reload live, separate clients no longer overwrite each other's changes, and album identity, seek progress and context menus are more reliable. Daemon TCP connections now use an address without a token and have no authentication.
+        </p>
+      </description>
+    </release>
     <release version="0.21.0" date="2026-10-14">
       <description>
         <p>

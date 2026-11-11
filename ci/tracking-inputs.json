@@ -6,6 +6,9 @@
     },
     "crane": {
       "source": "github:ipetkov/crane"
+    },
+    "rust-overlay": {
+      "source": "github:oxalica/rust-overlay"
     }
   }
 }

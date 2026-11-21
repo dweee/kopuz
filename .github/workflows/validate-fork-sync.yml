@@ -1,0 +1,30 @@
+name: Validate fork sync policy
+on:
+  pull_request:
+    paths:
+      - '.fork-ci.json'
+      - '.fork-ci/**'
+      - '.github/workflows/upstream-sync.yml'
+      - '.github/workflows/validate-fork-sync.yml'
+permissions:
+  contents: read
+jobs:
+  native-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: dweee/dave-fork-ci
+          ref: 74b21a2904ac5f6d6750f2f52f3a36f86b0b6651
+          path: controller
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+      - name: Build and test sync targets
+        run: python3 controller/bin/build.py --source source --system x86_64-linux --outputs "$RUNNER_TEMP/outputs"

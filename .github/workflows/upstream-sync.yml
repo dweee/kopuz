@@ -1,0 +1,24 @@
+name: Sync and test upstream
+'on':
+  schedule:
+  - cron: 17 */6 * * *
+  workflow_dispatch: null
+  repository_dispatch:
+    types:
+    - upstream-updated
+permissions: {}
+jobs:
+  upstream:
+    if: ${{ vars.GUARDED_UPSTREAM_SYNC_ENABLED == 'true' }}
+    permissions:
+      statuses: write
+      id-token: write
+      contents: write
+      actions: write
+      checks: read
+    uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@74b21a2904ac5f6d6750f2f52f3a36f86b0b6651
+    with:
+      tool-repository: dweee/dave-fork-ci
+      tool-revision: 74b21a2904ac5f6d6750f2f52f3a36f86b0b6651
+      auto-merge: ${{ vars.FORK_CI_AUTO_MERGE == 'true' && (vars.NIKS3_PUSH_ENABLED || vars.ATTIC_PUSH_ENABLED) == 'true' }}
+      cache: false

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "upstream": "Kopuz-org/kopuz",
+  "branch": "master",
+  "track": "branch",
+  "author": {
+    "name": "dave",
+    "email": "git@d.monke.fail"
+  },
+  "required_paths": [
+    "flake.nix",
+    "flake.lock"
+  ],
+  "protected_paths": [
+    "flake.nix",
+    "flake.lock",
+    "nix/**",
+    "ci/**"
+  ],
+  "matrix": [
+    {
+      "system": "x86_64-linux",
+      "packages": [
+        "kopuz"
+      ],
+      "checks": [
+        "qobuz"
+      ],
+      "tests": []
+    }
+  ]
+}

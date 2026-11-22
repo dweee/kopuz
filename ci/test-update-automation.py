@@ -182,7 +182,7 @@ class ApiRetries(unittest.TestCase):
 
     def test_get_retries_transport_failures_then_succeeds(self):
         calls = [TimeoutError('timed out'), HTTPError('u', 503, 'x', None, None), {'ok': True}]
-        def once(*args):
+        def once(*args, **kwargs):
             value = calls.pop(0)
             if isinstance(value, Exception): raise value
             return value
@@ -566,12 +566,53 @@ class InputUpdatePR(unittest.TestCase):
         self.publish(1, inputAutoMerge=False)
         self.assertEqual(self.forge.made('POST', '/merge'), [])
         self.forge = FakeForge()
-        with patch.object(a, 'attribution', return_value=''):
+        with patch.object(a, 'attribution', return_value=''), patch.object(a, 'publish_input_status') as status:
             self.publish(2, forge='github')
+        status.assert_called_once_with(dict(self.rules, forge='github'), '/repos/o/r', self.forge.prs[0]['number'], self.branch())
         self.assertEqual(self.forge.made('POST', '/merge'), [])
         runs = [c for c in self.forge.calls if '/actions/workflows/pr-checks.yml/runs?head_sha=' + self.branch() in c[1]]
         self.assertEqual(len(runs), 1)
         self.assertEqual(self.forge.made('POST', '/dispatches')[0][2], {'ref': a.INPUT_BRANCH})
+
+
+class InputStatus(unittest.TestCase):
+    def test_status_is_bound_to_the_current_successful_dispatch(self):
+        head = 'a' * 40
+        rules = {'forge': 'github', 'repository': 'o/r', 'branch': 'main'}
+        run = {'id': 23, 'head_sha': head, 'head_branch': a.INPUT_BRANCH,
+               'event': 'workflow_dispatch', 'status': 'completed', 'conclusion': 'success'}
+        job = {'name': 'test', 'head_sha': head, 'conclusion': 'success'}
+        pr = {'state': 'open', 'body': a.INPUT_MARKER, 'base': {'ref': 'main'},
+              'head': {'ref': a.INPUT_BRANCH, 'sha': head, 'repo': {'full_name': 'o/r'}}}
+        replies = [{'workflow_runs': [run]}, {'jobs': [job]}, pr, None]
+        with patch.object(a, 'api', side_effect=replies) as api, \
+                patch.dict(a.os.environ, {'AUTOMATION_STATUS_TOKEN': 'actions-fixture'}):
+            a.publish_input_status(rules, '/repos/o/r', 1, head, timeout=0)
+        self.assertIn('pr-checks.yml/runs?head_sha=' + head, api.call_args_list[0].args[2])
+        self.assertEqual(api.call_args.args[1:3], ('POST', '/repos/o/r/statuses/' + head))
+        self.assertEqual(api.call_args.kwargs['token'], 'actions-fixture')
+        self.assertEqual(api.call_args.args[3]['target_url'], 'https://github.com/o/r/actions/runs/23')
+
+    def test_wrong_head_failed_job_and_moved_pr_cannot_publish(self):
+        head = 'a' * 40
+        rules = {'forge': 'github', 'repository': 'o/r', 'branch': 'main'}
+        run = {'id': 23, 'head_sha': head, 'head_branch': a.INPUT_BRANCH,
+               'event': 'workflow_dispatch', 'status': 'completed', 'conclusion': 'success'}
+        job = {'name': 'test', 'head_sha': head, 'conclusion': 'success'}
+        for replies in (
+                [{'workflow_runs': [dict(run, head_sha='b' * 40)]}],
+                [{'workflow_runs': [run]}, {'jobs': [dict(job, conclusion='failure')]}],
+        ):
+            with patch.object(a, 'api', side_effect=replies) as api, \
+                    patch.dict(a.os.environ, {'AUTOMATION_STATUS_TOKEN': 'actions-fixture'}):
+                with self.assertRaises(ValueError):
+                    a.publish_input_status(rules, '/repos/o/r', 1, head, timeout=0)
+                self.assertTrue(all(call.args[1] == 'GET' for call in api.call_args_list))
+        with patch.object(a, 'api', side_effect=[{'workflow_runs': [run]}, {'jobs': [job]},
+                                                {'state': 'closed'}]) as api, \
+                patch.dict(a.os.environ, {'AUTOMATION_STATUS_TOKEN': 'actions-fixture'}):
+            a.publish_input_status(rules, '/repos/o/r', 1, head, timeout=0)
+            self.assertTrue(all(call.args[1] == 'GET' for call in api.call_args_list))
 
 
 if __name__ == '__main__': unittest.main()

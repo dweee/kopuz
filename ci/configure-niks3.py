@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import runpy
 import sys
 import subprocess
 import time
@@ -93,7 +94,8 @@ def configure(oidc=False):
         raise ValueError('Invalid read credential')
     config = directory/'nix.conf'
     read_url = 'https://niks3.monke.fail' + ('/oidc' if oidc else '')
-    config.write_text('extra-experimental-features = nix-command flakes\naccept-flake-config = false\n'
+    config.write_text('extra-experimental-features = nix-command flakes\naccept-flake-config = false\n' +
+                     runpy.run_path(str(Path(__file__).with_name('cache-config.py')))['nix_config']() +
                      'extra-substituters = '+read_url+'\n'
                      # Large Niks3 NARs repeatedly failed with HTTP/2 stream framing errors.
                      'http2 = false\nalways-allow-substitutes = true\nextra-trusted-public-keys = '+KEY+'\n'

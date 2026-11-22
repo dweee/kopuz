@@ -14,11 +14,12 @@ jobs:
       statuses: write
       id-token: write
       contents: write
+      pull-requests: write
       actions: write
       checks: read
-    uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@7f7b0ab6bb4f3a8d44d45f3f42b4ce48f8c530ea
+    uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@84e6e965fb4ec7b343cba352999d6660161ddba0
     with:
       tool-repository: dweee/dave-fork-ci
-      tool-revision: 7f7b0ab6bb4f3a8d44d45f3f42b4ce48f8c530ea
+      tool-revision: 84e6e965fb4ec7b343cba352999d6660161ddba0
       auto-merge: ${{ vars.FORK_CI_AUTO_MERGE == 'true' && vars.NIKS3_PUSH_ENABLED == 'true' }}
       cache: false

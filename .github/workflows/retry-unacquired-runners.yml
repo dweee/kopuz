@@ -6,6 +6,8 @@ name: Retry unacquired runners
     - Fork native builds
     - Input and manual version monitoring
     - PR automation checks
+    - Sync and test upstream
+    - Validate fork sync policy
     - Verified release channels
     types:
     - completed

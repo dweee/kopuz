@@ -61,11 +61,11 @@ def transient_api_failure(error):
     return isinstance(error, (URLError, socket.timeout, TimeoutError, ConnectionError))
 
 
-def api(rules, method, endpoint, data=None):
+def api(rules, method, endpoint, data=None, *, token=None):
     delays = iter(API_RETRY_DELAYS if method == 'GET' else ())
     while True:
         try:
-            return api_once(rules, method, endpoint, data)
+            return api_once(rules, method, endpoint, data, token=token)
         except (HTTPError, URLError, OSError) as error:
             delay = next(delays, None)
             if delay is None or not transient_api_failure(error):
@@ -76,9 +76,9 @@ def api(rules, method, endpoint, data=None):
             time.sleep(delay)
 
 
-def api_once(rules, method, endpoint, data=None):
+def api_once(rules, method, endpoint, data=None, *, token=None):
     origin = 'https://api.github.com' if rules['forge'] == 'github' else 'https://git.monke.fail/api/v1'
-    token = os.environ.get('AUTOMATION_TOKEN', '')
+    token = os.environ.get('AUTOMATION_TOKEN', '') if token is None else token
     if not token:
         raise ValueError('Missing repository automation token')
     class NoRedirect(HTTPRedirectHandler):
@@ -151,8 +151,9 @@ def dispatch_input_checks(rules, prefix, pr):
         return
     branch, sha = pr['head']['ref'], pr['head']['sha']
     configured = rules.get('inputCheckWorkflows', [])
-    # A PR opened with the workflow token starts no pull_request run, so the
-    # required `test` check is reported by dispatching the PR checks workflow too.
+    # A bot-authored pull_request run requires approval. Dispatch the same
+    # checks on the exact update branch without waiting for that approval.
+    pr_checks = False
     for workflow in configured + ([] if PR_CHECKS in configured else [PR_CHECKS]):
         if not re.fullmatch(r'[A-Za-z0-9_-]+[.]ya?ml', workflow):
             raise ValueError('Invalid input check workflow')
@@ -162,12 +163,52 @@ def dispatch_input_checks(rules, prefix, pr):
             if not runs.get('workflow_runs'):
                 phase('dispatch-input-checks')
                 api(rules, 'POST', endpoint + '/dispatches', {'ref': branch})
+            if workflow == PR_CHECKS:
+                pr_checks = True
         except HTTPError as error:
             error.close()
             # The implicit PR checks workflow may not be dispatchable on older installs.
             if workflow in configured or error.code not in (404, 422):
                 raise
             print('PR checks workflow cannot be dispatched; update the installed automation')
+    return pr_checks
+
+
+def publish_input_status(rules, prefix, number, head, *, timeout=1800):
+    # A dispatched check run is not a PR check for branch rulesets. Bridge the
+    # reviewed workflow's result using the Actions token that owns the context.
+    token = os.environ.get('AUTOMATION_STATUS_TOKEN')
+    if not token:
+        raise ValueError('Missing GitHub Actions status token')
+    phase('wait-input-check')
+    endpoint = (prefix + '/actions/workflows/' + PR_CHECKS + '/runs?head_sha=' + head
+                + '&event=workflow_dispatch&branch=' + INPUT_BRANCH + '&per_page=20')
+    deadline = time.monotonic() + timeout
+    while True:
+        runs = api(rules, 'GET', endpoint)['workflow_runs']
+        run = next((run for run in runs if run.get('head_sha') == head
+                    and run.get('head_branch') == INPUT_BRANCH
+                    and run.get('event') == 'workflow_dispatch'), None)
+        if run and run.get('status') == 'completed':
+            break
+        if time.monotonic() >= deadline:
+            raise ValueError('Timed out waiting for the input update test')
+        time.sleep(20)
+    if run.get('conclusion') != 'success':
+        raise ValueError('The input update check workflow did not pass')
+    jobs = api(rules, 'GET', prefix + '/actions/runs/' + str(run['id']) + '/jobs')['jobs']
+    tests = [job for job in jobs if job.get('name') == 'test' and job.get('head_sha') == head]
+    if len(tests) != 1 or tests[0].get('conclusion') != 'success':
+        raise ValueError('The test job did not pass on the input update head')
+    live = api(rules, 'GET', prefix + '/pulls/' + str(number))
+    if (live.get('state') != 'open' or not input_pr(rules, live)
+            or live.get('head', {}).get('sha') != head):
+        return
+    phase('publish-input-check')
+    api(rules, 'POST', prefix + '/statuses/' + head, {
+        'context': 'test', 'state': 'success', 'description': 'Passed on the exact input update head',
+        'target_url': 'https://github.com/' + rules['repository'] + '/actions/runs/' + str(run['id']),
+    }, token=token)
 
 
 def open_input_prs(rules, prefix):
@@ -379,7 +420,8 @@ def inputs(rules):
                                                        'head': INPUT_BRANCH, 'base': rules['branch'], 'body': body})
         print(current.get('html_url', 'Created input update PR'))
     # The listed PR head predates a push made by this run.
-    dispatch_input_checks(rules, prefix, {'head': {'ref': INPUT_BRANCH, 'sha': head}})
+    if dispatch_input_checks(rules, prefix, {'head': {'ref': INPUT_BRANCH, 'sha': head}}):
+        publish_input_status(rules, prefix, current['number'], head)
     schedule_input_merge(rules, prefix, current)
     consolidate_input_prs(rules, prefix, prs, current, head)
 

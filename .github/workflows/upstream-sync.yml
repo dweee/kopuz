@@ -1,7 +1,7 @@
 name: Sync and test upstream
 'on':
   schedule:
-  - cron: 17 */6 * * *
+  - cron: "23 */6 * * *"
   workflow_dispatch: null
   repository_dispatch:
     types:

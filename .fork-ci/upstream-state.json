@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "upstream": "Kopuz-org/kopuz",
+  "branch": "06f854847cfd99930c8a88e5b0b24720d4e72cc9",
   "track": "branch",
-  "branch": "552400339461ef09c09d4db133bf356ea8fead18"
+  "upstream": "Kopuz-org/kopuz",
+  "version": 1
 }

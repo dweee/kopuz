@@ -279,6 +279,12 @@ def policy():
         owners = ({p for entry in json.loads(owners_file.read_text()).values() for p in entry['packages']}
                   if owners_file.exists() and not value.get('integrationInventory') else set())
         expected = {'packages.'+s+'.'+p for s, ps in inventory.items() for p in ps if p not in owners}
+        build_only_file = ROOT / 'nix/build-only-packages.json'
+        if build_only_file.exists():
+            build_only = {'packages.'+s+'.'+p for s, ps in json.loads(build_only_file.read_text()).items() for p in ps}
+            if not build_only <= expected:
+                raise ValueError('Build-only packages must belong to the native inventory')
+            expected -= build_only
         cache_only = ROOT / 'nix/cache-only-platforms.json'
         if cache_only.exists():
             expected |= {'cacheOnlyPackages.'+s+'.'+p for s, ps in json.loads(cache_only.read_text()).items() for p in ps}

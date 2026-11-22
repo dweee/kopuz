@@ -211,6 +211,28 @@ class Gates(unittest.TestCase):
             run.assert_not_called()
 
 
+class InventoryPolicy(unittest.TestCase):
+    def policy(self, build_only=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'ci').mkdir(); (root/'nix').mkdir()
+            targets = {'x86_64-linux': [{'attribute': 'packages.x86_64-linux.app', 'visibility': 'public'}]}
+            (root/'ci/channels.json').write_text(json.dumps({'version': 1, 'forge': 'github', 'repository': 'o/r',
+                                                             'remote': 'https://github.com/o/r.git', 'targets': targets}))
+            (root/'nix/platforms.json').write_text(json.dumps({'x86_64-linux': ['app', 'setup']}))
+            if build_only is not None:
+                (root/'nix/build-only-packages.json').write_text(json.dumps(build_only))
+            with patch.object(c, 'ROOT', root):
+                return c.policy()
+
+    def test_build_only_packages_are_left_out_of_the_release_inventory(self):
+        with self.assertRaisesRegex(ValueError, 'does not cover'):
+            self.policy()
+        self.assertEqual(self.policy({'x86_64-linux': ['setup']})['repository'], 'o/r')
+        with self.assertRaisesRegex(ValueError, 'Build-only packages must belong'):
+            self.policy({'x86_64-linux': ['missing']})
+
+
 class CacheIdentity(unittest.TestCase):
     def load(self, forge):
         with patch.object(Path, 'read_text', return_value='{"forge":"%s"}' % forge):

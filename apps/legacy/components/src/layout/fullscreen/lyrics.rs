@@ -1,0 +1,22 @@
+use dioxus::prelude::*;
+use hooks::use_player_controller::PlayerController;
+
+/// The words for what is playing, for the fullscreen view. The daemon finds
+/// them; this only says which track and what to show when there are none.
+pub(crate) fn use_fullscreen_lyrics() -> Signal<hooks::lyrics::LyricsState> {
+    let ctrl = use_context::<PlayerController>();
+    let track_key = use_memo(move || {
+        ctrl.current_track_snapshot
+            .read()
+            .as_ref()
+            .map(|track| track.key.clone())
+            .unwrap_or_default()
+    });
+    let radio = use_memo(move || {
+        ctrl.current_track_snapshot
+            .read()
+            .as_ref()
+            .is_some_and(|track| track.kind == api::TrackKind::Radio)
+    });
+    hooks::lyrics::use_lyrics(track_key, radio, i18n::t("lyrics_not_found").to_string())
+}

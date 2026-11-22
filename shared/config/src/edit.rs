@@ -25,6 +25,8 @@ pub enum PlaybackEdit {
     ReplayGain(ReplayGainSettings),
     DeviceChangeBehavior(DeviceChangeBehavior),
     SampleRateMode(SampleRateMode),
+    OutputDevice(Option<String>),
+    ExclusiveOutput(bool),
     StreamQuality(StreamQuality),
     AutoplayRadio(bool),
     SkipExplicit(bool),
@@ -66,6 +68,7 @@ pub enum BackgroundEdit {
 pub enum LyricsEdit {
     PreferLocalLyrics(bool),
     EnableMusixmatchLyrics(bool),
+    RomanizeLyrics(bool),
     LyricsOffsetMs(i32),
     LyricsOffsetAuto(bool),
     LyricsDepthBlur(bool),
@@ -92,6 +95,7 @@ pub enum IntegrationsEdit {
     DiscordPresence(Option<bool>),
     DiscordPresenceSource(Option<bool>),
     DiscordPresenceUploadCover(Option<bool>),
+    DiscordPresenceListenButton(Option<bool>),
     RadioRegistries(RadioRegistryOp),
 }
 
@@ -143,6 +147,7 @@ pub enum SystemEdit {
     AutoCheckUpdates(bool),
     MinimizeToTray(bool),
     ConnectivityCheckUrls(Vec<String>),
+    ListenAddress(String),
 }
 
 /// One change to one setting.
@@ -237,7 +242,8 @@ impl SettingKey {
             Self::Integrations(key) => match key {
                 IntegrationsKey::DiscordPresence
                 | IntegrationsKey::DiscordPresenceSource
-                | IntegrationsKey::DiscordPresenceUploadCover => {
+                | IntegrationsKey::DiscordPresenceUploadCover
+                | IntegrationsKey::DiscordPresenceListenButton => {
                     Some("SourceApi::set_integration_settings")
                 }
                 IntegrationsKey::RadioRegistries => None,
@@ -359,6 +365,8 @@ impl Playback {
             PlaybackEdit::ReplayGain(value) => self.replay_gain = value,
             PlaybackEdit::DeviceChangeBehavior(value) => self.device_change_behavior = value,
             PlaybackEdit::SampleRateMode(value) => self.sample_rate_mode = value,
+            PlaybackEdit::OutputDevice(value) => self.output_device = value,
+            PlaybackEdit::ExclusiveOutput(value) => self.exclusive_output = value,
             PlaybackEdit::StreamQuality(value) => self.stream_quality = value,
             PlaybackEdit::AutoplayRadio(value) => self.autoplay_radio = value,
             PlaybackEdit::SkipExplicit(value) => self.skip_explicit = value,
@@ -408,6 +416,7 @@ impl Lyrics {
         match edit {
             LyricsEdit::PreferLocalLyrics(value) => self.prefer_local_lyrics = value,
             LyricsEdit::EnableMusixmatchLyrics(value) => self.enable_musixmatch_lyrics = value,
+            LyricsEdit::RomanizeLyrics(value) => self.romanize_lyrics = value,
             LyricsEdit::LyricsOffsetMs(value) => self.lyrics_offset_ms = value,
             LyricsEdit::LyricsOffsetAuto(value) => self.lyrics_offset_auto = value,
             LyricsEdit::LyricsDepthBlur(value) => self.lyrics_depth_blur = value,
@@ -435,6 +444,9 @@ impl Integrations {
         match edit {
             IntegrationsEdit::DiscordPresence(value) => self.discord_presence = value,
             IntegrationsEdit::DiscordPresenceSource(value) => self.discord_presence_source = value,
+            IntegrationsEdit::DiscordPresenceListenButton(value) => {
+                self.discord_presence_listen_button = value
+            }
             IntegrationsEdit::DiscordPresenceUploadCover(value) => {
                 self.discord_presence_upload_cover = value
             }
@@ -480,6 +492,7 @@ impl System {
             SystemEdit::AutoCheckUpdates(value) => self.auto_check_updates = value,
             SystemEdit::MinimizeToTray(value) => self.minimize_to_tray = value,
             SystemEdit::ConnectivityCheckUrls(value) => self.connectivity_check_urls = value,
+            SystemEdit::ListenAddress(value) => self.listen_address = value,
         }
     }
 }
@@ -520,6 +533,10 @@ pub fn edit_samples() -> Vec<SettingsEdit> {
             DeviceChangeBehavior::Resume,
         )),
         SettingsEdit::Playback(PlaybackEdit::SampleRateMode(SampleRateMode::Source)),
+        SettingsEdit::Playback(PlaybackEdit::OutputDevice(Some(
+            "alsa:hw:CARD=0,DEV=0".into(),
+        ))),
+        SettingsEdit::Playback(PlaybackEdit::ExclusiveOutput(true)),
         SettingsEdit::Playback(PlaybackEdit::StreamQuality(StreamQuality::Low)),
         SettingsEdit::Playback(PlaybackEdit::AutoplayRadio(true)),
         SettingsEdit::Playback(PlaybackEdit::SkipExplicit(true)),
@@ -549,6 +566,7 @@ pub fn edit_samples() -> Vec<SettingsEdit> {
         SettingsEdit::Background(BackgroundEdit::CustomBackgroundPath("/bg.png".into())),
         SettingsEdit::Lyrics(LyricsEdit::PreferLocalLyrics(true)),
         SettingsEdit::Lyrics(LyricsEdit::EnableMusixmatchLyrics(true)),
+        SettingsEdit::Lyrics(LyricsEdit::RomanizeLyrics(true)),
         SettingsEdit::Lyrics(LyricsEdit::LyricsOffsetMs(-250)),
         SettingsEdit::Lyrics(LyricsEdit::LyricsOffsetAuto(false)),
         SettingsEdit::Lyrics(LyricsEdit::LyricsDepthBlur(false)),
@@ -559,7 +577,9 @@ pub fn edit_samples() -> Vec<SettingsEdit> {
             directories: vec!["/music".into()],
         }])),
         SettingsEdit::Library(LibraryEdit::AutoFetchCovers(true)),
-        SettingsEdit::Library(LibraryEdit::CoverFetchStrategy(FetchStrategy::LastFmOnly)),
+        SettingsEdit::Library(LibraryEdit::CoverFetchStrategy(
+            FetchStrategy::MusicBrainzOnly,
+        )),
         SettingsEdit::Library(LibraryEdit::OfflineQuality(OfflineQuality::Kbps160)),
         SettingsEdit::Library(LibraryEdit::OfflineCacheEnabled(false)),
         SettingsEdit::Library(LibraryEdit::OfflineCacheMaxBytes(2_000_000_000)),
@@ -567,6 +587,7 @@ pub fn edit_samples() -> Vec<SettingsEdit> {
         SettingsEdit::Integrations(IntegrationsEdit::DiscordPresence(Some(false))),
         SettingsEdit::Integrations(IntegrationsEdit::DiscordPresenceSource(None)),
         SettingsEdit::Integrations(IntegrationsEdit::DiscordPresenceUploadCover(Some(true))),
+        SettingsEdit::Integrations(IntegrationsEdit::DiscordPresenceListenButton(Some(false))),
         SettingsEdit::Integrations(IntegrationsEdit::RadioRegistries(RadioRegistryOp::Put(
             registry,
         ))),
@@ -589,6 +610,7 @@ pub fn edit_samples() -> Vec<SettingsEdit> {
         SettingsEdit::System(SystemEdit::ConnectivityCheckUrls(vec![
             "https://check.example/up".into(),
         ])),
+        SettingsEdit::System(SystemEdit::ListenAddress("127.0.0.1:7700".into())),
     ]
 }
 
@@ -647,6 +669,14 @@ mod tests {
             let name = SettingKey::of(&edit).name();
             let mut next = base.clone();
             next.apply(edit.clone());
+            // The old provider preference is retained as a no-op for existing clients.
+            if matches!(
+                edit,
+                SettingsEdit::Library(LibraryEdit::CoverFetchStrategy(_))
+            ) {
+                assert_eq!(next, base);
+                continue;
+            }
             let after = json_of(&next);
             let moved: Vec<&String> = after
                 .iter()
@@ -733,6 +763,8 @@ mod tests {
                 "cp.cloudflare.com".into(),
             ])),
             SettingsEdit::System(SystemEdit::ConnectivityCheckUrls(vec!["https://".into()])),
+            SettingsEdit::System(SystemEdit::ListenAddress("localhost".into())),
+            SettingsEdit::System(SystemEdit::ListenAddress("127.0.0.1".into())),
         ] {
             let mut settings = Settings::default();
             assert!(settings.try_apply(edit.clone()).is_err(), "{edit:?}");
@@ -804,6 +836,7 @@ mod tests {
                 "discord_presence",
                 "discord_presence_source",
                 "discord_presence_upload_cover",
+                "discord_presence_listen_button",
                 "ytdlp_output_dir",
                 "ytdlp_options",
                 "spotify_browser",

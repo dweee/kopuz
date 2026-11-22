@@ -32,6 +32,7 @@ fn track(key: &str, credits: Vec<ArtistCredit>) -> Track {
         duration: 1,
         khz: 0,
         bitrate: 0,
+        bit_depth: 0,
         track_number: None,
         disc_number: None,
         musicbrainz_release_id: None,
@@ -177,6 +178,7 @@ fn server(token: Option<&str>) -> db::StoredSources {
             account: None,
             apple_music_storefront: "jp".into(),
             apple_music_language: "en".into(),
+            plugin_service: None,
         }],
         server: Some(MusicServer {
             name: "am".into(),
@@ -191,6 +193,7 @@ fn server(token: Option<&str>) -> db::StoredSources {
             account: None,
             apple_music_storefront: "jp".into(),
             apple_music_language: "en".into(),
+            plugin_service: None,
         }),
         active: config::Source::Server("s1".into()),
         ..Default::default()

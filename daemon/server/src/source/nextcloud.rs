@@ -226,6 +226,7 @@ impl MediaSource for NextcloudSource {
                     duration,
                     khz: 0,
                     bitrate: 0,
+                    bit_depth: 0,
                     track_number: track.track_number,
                     disc_number: track.disc_number,
                     musicbrainz_release_id: None,
@@ -255,6 +256,7 @@ impl MediaSource for NextcloudSource {
         _: config::StreamQuality,
     ) -> Result<StreamInfo, SourceError> {
         Ok(StreamInfo {
+            guard: None,
             url: self.client()?.stream_url(item_id),
             format: None,
             user_agent: None,

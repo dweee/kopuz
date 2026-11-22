@@ -308,6 +308,13 @@ impl SourceService {
                 "audio files must be between 1 byte and 500 MiB",
             ));
         }
+        // A plugin holds an upload in its sandbox, which can grow to hold the
+        // largest; one at a time keeps several from adding up.
+        static ONE_AT_A_TIME: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let _turn = ONE_AT_A_TIME
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal("uploads have stopped"))?;
         let (_, source) = self.resolve(&upload.source_id).await?;
         source
             .upload_track(upload.filename, upload.content)
@@ -401,6 +408,12 @@ impl SourceService {
         let held = self.current.lock().await;
         self.session
             .set_active_source(Some(self.build_active(&held.running())));
+    }
+
+    /// A plugin was installed or removed: rebuild the active source, which
+    /// may be one it serves.
+    pub async fn plugins_changed(&self) {
+        self.refresh_active().await;
     }
 
     /// The last probe answer for `id`, if it has been probed.
@@ -546,20 +559,27 @@ impl SourceService {
                     .as_ref()
                     .ok_or_else(|| ApiError::not_found("no such server"))?;
                 let view = crate::services::ServerView::from(server);
+                let reads_folders = crate::services::server_reads_folders(
+                    server.service,
+                    server.plugin_service.as_deref(),
+                );
                 info.name = server.name.clone();
-                info.needs_network = server.service != config::MusicService::AudioCd;
+                info.needs_network =
+                    server.service != config::MusicService::AudioCd && !reads_folders;
                 info.works_offline = server.service == config::MusicService::AudioCd
+                    || reads_folders
                     || network::is_local(&key, Some(&server.url));
-                info.service = crate::services::service_ref(server.service);
-
+                info.service =
+                    crate::services::server_ref(server.service, server.plugin_service.as_deref());
+                // Qobuz stores app credentials before login, so only a usable
+                // session counts as authenticated.
                 info.authenticated = if server.service == config::MusicService::Qobuz {
                     server.access_token.as_deref().is_some_and(|packed| {
                         server::qobuz::QobuzClient::from_session(packed).is_ok()
                     })
                 } else {
                     server.access_token.is_some()
-                        || server.yt_anonymous
-                        || server.service == config::MusicService::AudioCd
+                        || crate::services::sign_in(&view, false) == api::SignInKind::None
                 };
                 info.sign_in = crate::services::sign_in(&view, info.authenticated);
 
@@ -583,7 +603,7 @@ impl SourceService {
                         server.user_id.as_deref().unwrap_or_default(),
                     ));
                 }
-                if info.capabilities.browse_folders {
+                if info.capabilities.browse_folders || reads_folders {
                     info.settings.push(crate::services::directories_field(
                         &resolved.folders_for(server_id),
                     ));
@@ -814,7 +834,7 @@ impl SourceService {
     /// Which service a draft names, refused as invalid input if it is not one
     /// this daemon has.
     fn drafted_service(draft: &SourceDraft) -> Result<config::MusicService, ApiError> {
-        config::MusicService::from_id(&draft.service)
+        crate::services::resolve(&draft.service)
             .ok_or_else(|| ApiError::invalid_input("no such service"))
     }
 
@@ -907,6 +927,10 @@ impl SourceService {
         let mut saved = config::SavedServer::new(String::new(), String::new(), service);
         saved.id = id.clone();
         crate::services::apply(service, &draft, &mut saved);
+        // A plugin reading folders keeps them as the source's library roots.
+        let folders = (service == config::MusicService::Plugin
+            && crate::services::plugin_reads_folders(&draft.service))
+        .then(|| crate::services::folder_paths(&draft.values));
         let secret = api::schema::value_of(&draft.secrets, crate::services::TOKEN)
             .map(str::trim)
             .filter(|secret| !secret.is_empty())
@@ -938,6 +962,9 @@ impl SourceService {
                     existing.account = account;
                 }
                 None => sources.servers.push(saved.clone()),
+            }
+            if let Some(folders) = folders {
+                sources.set_folders_for(&saved.id, folders);
             }
             if sources.active.server_id() == Some(saved.id.as_str())
                 && let Some(server) = sources.server.as_mut()
@@ -1223,16 +1250,9 @@ impl SourceService {
                     .map_err(|error| source_error(error.into()))?,
                 user_id: client.user_id().to_owned(),
             }
-        } else if server.service == config::MusicService::Clippsly {
-            let client = server::clippsly::ClippslyClient::new(&server.url, &request.password)
-                .map_err(source_error)?;
-            let account = client.account().await.map_err(source_error)?;
-            server::provider::AuthSession {
-                access_token: request.password,
-                user_id: account.id.to_string(),
-            }
         } else {
             server::provider::ProviderClient::new(server.service, server.url, device_id)
+                .with_plugin_service(server.plugin_service)
                 .login(request.username.trim(), &request.password)
                 .await
                 .map_err(source_error)?
@@ -1728,8 +1748,16 @@ impl SourceService {
         let Ok(Some(server)) = self.db.load_server(id).await else {
             return false;
         };
-        let usable = server.access_token.is_some() || server.yt_anonymous;
-        usable && !network::is_local(&source, Some(&server.url))
+        let needs_none =
+            crate::services::sign_in(&crate::services::ServerView::from(&server), false)
+                == api::SignInKind::None;
+        let usable = server.access_token.is_some() || needs_none;
+        usable
+            && !crate::services::server_reads_folders(
+                server.service,
+                server.plugin_service.as_deref(),
+            )
+            && !network::is_local(&source, Some(&server.url))
     }
 
     /// One spaced, shared connectivity check and what follows from it; `fresh` skips the spacing, as a scheduled recheck does.
@@ -2749,6 +2777,7 @@ mod tests {
                 duration: 60,
                 khz: 44,
                 bitrate: 320,
+                bit_depth: 0,
                 track_number: None,
                 disc_number: None,
                 musicbrainz_release_id: None,

@@ -11,7 +11,7 @@
   "cover_art_background": false,
   "cover_art_blur": 0,
   "cover_art_darkening": 45,
-  "cover_fetch_strategy": "LastFmFirst",
+  "cover_fetch_strategy": "MusicBrainzOnly",
   "crossfade_seconds": 4,
   "custom_background_path": "/home/me/Pictures/wall.png",
   "custom_font_path": "",
@@ -32,6 +32,7 @@
   },
   "device_change_behavior": "Pause",
   "discord_presence": false,
+  "discord_presence_listen_button": true,
   "discord_presence_source": true,
   "discord_presence_upload_cover": false,
   "enable_musixmatch_lyrics": false,
@@ -52,8 +53,10 @@
     "preamp_db": -4.5,
     "preset": "Custom"
   },
+  "exclusive_output": false,
   "fullscreen_use_player_bar": false,
   "language": "tr",
+  "listen_address": "",
   "live_theme_path": "",
   "local_sources": [
     {
@@ -80,6 +83,7 @@
   "offline_cache_enabled": true,
   "offline_cache_max_bytes": 5000000000,
   "offline_quality": "Kbps256",
+  "output_device": null,
   "pause_watch_history": false,
   "player_bar_position": "Bottom",
   "prefer_local_lyrics": false,
@@ -103,6 +107,7 @@
     "preamp_db": 1.5,
     "prevent_clipping": true
   },
+  "romanize_lyrics": false,
   "sample_rate_mode": "System",
   "settings_layout": "Cd",
   "show_row_images": true,

@@ -65,6 +65,7 @@ fn track(key: &str) -> Track {
         duration: 6,
         khz: 44,
         bitrate: 320,
+        bit_depth: 0,
         track_number: None,
         disc_number: None,
         musicbrainz_release_id: None,
@@ -178,7 +179,6 @@ async fn spawn_pair() -> Pair {
         config::Source::default(),
         Arc::new(radio::registry::StationRegistry::default()),
         dir.path().join("covers"),
-        credentials.clone(),
     ));
     let player = Player::try_with_sink(Box::new(NullSink::new())).expect("headless player starts");
     let provider: FactoryOverride = Arc::new(|_| Some(wav_factory(6)));
@@ -465,6 +465,8 @@ async fn cli_playback_and_search_work_over_each_transport() {
             api,
             ctl::Command::Play {
                 keys: vec![key.clone()],
+                next: false,
+                append: false,
             },
             None,
         )
@@ -498,6 +500,22 @@ async fn cli_playback_and_search_work_over_each_transport() {
         .await
         .expect("queue");
         assert_eq!(queue[0]["key"], key);
+        ctl::execute(
+            api,
+            ctl::Command::Play {
+                keys: vec![key.clone()],
+                next: true,
+                append: false,
+            },
+            None,
+        )
+        .await
+        .expect("play next");
+        let status = ctl::execute(api, ctl::Command::Status, None)
+            .await
+            .expect("status after play next");
+        assert_eq!(status["queue_length"], 2, "queued behind, not replacing");
+        assert_eq!(status["phase"], "paused", "what plays now is left alone");
         ctl::execute(api, ctl::Command::Stop, None)
             .await
             .expect("stop");
@@ -1007,6 +1025,30 @@ fn normalized(mut state: PlayerState) -> PlayerState {
     state.now_ms = 0;
     state.position = None;
     state
+}
+
+#[tokio::test]
+async fn plugins_are_not_installed_or_removed_over_tcp() {
+    let pair = spawn_pair().await;
+    let refused = |error: ApiError| {
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert!(
+            error.message.contains("only from this computer"),
+            "{error:?}"
+        );
+    };
+    refused(
+        pair.tcp
+            .install_plugin("internet-archive".into(), vec!["archive.org".into()])
+            .await
+            .expect_err("install over tcp"),
+    );
+    refused(
+        pair.tcp
+            .uninstall_plugin("internet-archive".into())
+            .await
+            .expect_err("uninstall over tcp"),
+    );
 }
 
 #[tokio::test]
@@ -3822,29 +3864,30 @@ async fn integrations_agree_across_transports_and_carry_no_secret() {
 
     let local = pair.local.integrations().await.expect("local integrations");
     assert_eq!(local, pair.wire.integrations().await.expect("wire"));
-    let lastfm = local
+    assert!(local.iter().all(|integration| integration.id != "lastfm"));
+    assert!(local.iter().any(|integration| integration.id == "librefm"));
+    let listenbrainz = local
         .iter()
-        .find(|integration| integration.id == "lastfm")
-        .expect("last.fm is offered");
+        .find(|integration| integration.id == "listenbrainz")
+        .expect("ListenBrainz is offered");
     assert!(
-        !lastfm.configured,
+        !listenbrainz.configured,
         "nothing is connected in a fresh library"
     );
-    assert_eq!(lastfm.connect, api::ConnectKind::WebSignIn);
     assert!(
-        lastfm
+        listenbrainz
             .fields
             .iter()
             .all(|field| matches!(field.kind, api::FieldKind::Secret) && field.value.is_none()),
         "its fields are secrets, and a secret is never sent out: {:?}",
-        lastfm.fields
+        listenbrainz.fields
     );
 
     let updated = pair
         .wire
         .set_integration_settings(
-            "lastfm".to_string(),
-            vec![api::FieldValue::new("api_key", "a-key-nobody-should-see")],
+            "listenbrainz".to_string(),
+            vec![api::FieldValue::new("token", "a-key-nobody-should-see")],
         )
         .await
         .expect("set settings");
@@ -3859,14 +3902,17 @@ async fn integrations_agree_across_transports_and_carry_no_secret() {
         "nor may the settings a client reads: {settings}"
     );
 
+    let removed = pair
+        .local
+        .set_integration_settings("lastfm".to_string(), Vec::new())
+        .await
+        .err()
+        .map(|error| error.code);
+    assert_eq!(removed, Some(api::ErrorCode::NotFound));
     assert_eq!(
-        pair.local
-            .set_integration_settings("nope".to_string(), Vec::new())
-            .await
-            .err()
-            .map(|error| error.code),
+        removed,
         pair.wire
-            .set_integration_settings("nope".to_string(), Vec::new())
+            .set_integration_settings("lastfm".to_string(), Vec::new())
             .await
             .err()
             .map(|error| error.code),
@@ -3896,7 +3942,8 @@ async fn browser_connect_agrees_across_transports() {
 
     for (id, code) in [
         ("listenbrainz", api::ErrorCode::NotFound),
-        ("lastfm", api::ErrorCode::Unsupported),
+        ("librefm", api::ErrorCode::Unsupported),
+        ("lastfm", api::ErrorCode::NotFound),
     ] {
         let local = pair
             .local

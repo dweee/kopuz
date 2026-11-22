@@ -74,19 +74,13 @@ pub fn device_change_behavior_from_proto(value: i32) -> config::DeviceChangeBeha
 
 pub fn fetch_strategy_to_proto(value: config::FetchStrategy) -> FetchStrategy {
     match value {
-        config::FetchStrategy::MusicBrainzFirst => FetchStrategy::MusicBrainzFirst,
-        config::FetchStrategy::LastFmFirst => FetchStrategy::LastFmFirst,
         config::FetchStrategy::MusicBrainzOnly => FetchStrategy::MusicBrainzOnly,
-        config::FetchStrategy::LastFmOnly => FetchStrategy::LastFmOnly,
     }
 }
 
 pub fn fetch_strategy_from_proto(value: i32) -> config::FetchStrategy {
     match FetchStrategy::try_from(value).unwrap_or(FetchStrategy::Unspecified) {
-        FetchStrategy::MusicBrainzFirst => config::FetchStrategy::MusicBrainzFirst,
-        FetchStrategy::LastFmFirst => config::FetchStrategy::LastFmFirst,
         FetchStrategy::MusicBrainzOnly => config::FetchStrategy::MusicBrainzOnly,
-        FetchStrategy::LastFmOnly => config::FetchStrategy::LastFmOnly,
         FetchStrategy::Unspecified => config::FetchStrategy::default(),
     }
 }
@@ -432,6 +426,7 @@ pub fn config_to_proto(value: &config::Settings) -> Config {
         connectivity_check_urls: Some(StringList {
             values: system.connectivity_check_urls.clone(),
         }),
+        listen_address: system.listen_address.clone(),
         show_source_toggle: ui.show_source_toggle,
         show_row_images: ui.show_row_images,
         volume_scroll_step: playback.volume_scroll_step,
@@ -448,6 +443,8 @@ pub fn config_to_proto(value: &config::Settings) -> Config {
         device_change_behavior: device_change_behavior_to_proto(playback.device_change_behavior)
             as i32,
         sample_rate_mode: sample_rate_mode_to_proto(playback.sample_rate_mode) as i32,
+        output_device: playback.output_device.clone(),
+        exclusive_output: playback.exclusive_output,
         titlebar_mode: titlebar_mode_to_proto(ui.titlebar_mode) as i32,
         offline_quality: offline_quality_to_proto(library.offline_quality) as i32,
         stream_quality: stream_quality_to_proto(playback.stream_quality) as i32,
@@ -466,6 +463,7 @@ pub fn config_to_proto(value: &config::Settings) -> Config {
             .collect(),
         prefer_local_lyrics: lyrics.prefer_local_lyrics,
         enable_musixmatch_lyrics: lyrics.enable_musixmatch_lyrics,
+        romanize_lyrics: lyrics.romanize_lyrics,
         lyrics_offset_ms: lyrics.lyrics_offset_ms,
         lyrics_offset_auto: lyrics.lyrics_offset_auto,
         lyrics_depth_blur: lyrics.lyrics_depth_blur,
@@ -476,6 +474,7 @@ pub fn config_to_proto(value: &config::Settings) -> Config {
         discord_presence: integrations.discord_presence,
         discord_presence_source: integrations.discord_presence_source,
         discord_presence_upload_cover: integrations.discord_presence_upload_cover,
+        discord_presence_listen_button: integrations.discord_presence_listen_button,
         spotify_browser: spotify.spotify_browser.clone(),
         spotify_prefer_active_device: spotify.spotify_prefer_active_device,
         downloader_output_dir: downloads.downloader_output_dir.clone(),
@@ -494,6 +493,8 @@ pub fn config_from_proto(value: &Config) -> config::Settings {
             replay_gain: replay_gain_from_proto(value.replay_gain.as_ref()),
             device_change_behavior: device_change_behavior_from_proto(value.device_change_behavior),
             sample_rate_mode: sample_rate_mode_from_proto(value.sample_rate_mode),
+            output_device: value.output_device.clone(),
+            exclusive_output: value.exclusive_output,
             stream_quality: stream_quality_from_proto(value.stream_quality),
             autoplay_radio: value.autoplay_radio,
             skip_explicit: value.skip_explicit,
@@ -527,6 +528,7 @@ pub fn config_from_proto(value: &Config) -> config::Settings {
         lyrics: config::Lyrics {
             prefer_local_lyrics: value.prefer_local_lyrics,
             enable_musixmatch_lyrics: value.enable_musixmatch_lyrics,
+            romanize_lyrics: value.romanize_lyrics,
             lyrics_offset_ms: value.lyrics_offset_ms,
             lyrics_offset_auto: value.lyrics_offset_auto,
             lyrics_depth_blur: value.lyrics_depth_blur,
@@ -554,6 +556,7 @@ pub fn config_from_proto(value: &Config) -> config::Settings {
             discord_presence: value.discord_presence,
             discord_presence_source: value.discord_presence_source,
             discord_presence_upload_cover: value.discord_presence_upload_cover,
+            discord_presence_listen_button: value.discord_presence_listen_button,
             radio_registries: value
                 .radio_registries
                 .iter()
@@ -576,6 +579,7 @@ pub fn config_from_proto(value: &Config) -> config::Settings {
                 Some(list) => list.values.clone(),
                 None => config::System::default().connectivity_check_urls,
             },
+            listen_address: value.listen_address.clone(),
         },
     }
 }
@@ -584,6 +588,20 @@ pub fn config_from_proto(value: &Config) -> config::Settings {
 mod tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn retired_cover_strategy_numbers_fall_back_to_musicbrainz() {
+        for value in [0, 1, 2, 3, 4, 999] {
+            assert_eq!(
+                fetch_strategy_from_proto(value),
+                config::FetchStrategy::MusicBrainzOnly
+            );
+        }
+        assert_eq!(
+            fetch_strategy_to_proto(config::FetchStrategy::MusicBrainzOnly) as i32,
+            3
+        );
+    }
 
     #[test]
     fn appearance_survives_the_wire_round_trip() {

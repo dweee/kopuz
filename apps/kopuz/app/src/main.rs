@@ -4,12 +4,14 @@
 mod args;
 mod backdrop;
 mod handover;
+mod instance;
+mod links;
 #[cfg(target_os = "macos")]
 mod menus;
 mod router;
 mod shell;
 mod system_ease;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod tray;
 
 use std::time::{Duration, Instant};
@@ -104,8 +106,29 @@ fn main() -> anyhow::Result<()> {
 
     let (address, start_own) = daemon_address()?;
     let args = args::Args::parse(std::env::args_os().skip(1));
+    let _instance = match (instance::claim(&address), &args.link) {
+        (Err(instance::Elsewhere::Running), Some(link)) => {
+            // The daemon plays a listen link; any other is the open window's to show.
+            match store::deep_link::is_listen(link) {
+                true => instance::hand_off(&address, link.clone()),
+                false => links::hand_off(&address, link),
+            }
+            return Ok(());
+        }
+        (claimed, _) => claimed.ok(),
+    };
 
     let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    // macOS hands a link to the running app here rather than on a command line.
+    let (opened_tx, opened) = futures::channel::mpsc::unbounded::<String>();
+    let relay = link::relay::path(&address);
+    let relayed = opened_tx.clone();
+    let (booted, boot) = futures::channel::oneshot::channel();
+    application.on_open_urls(move |urls| {
+        for url in urls.into_iter().filter(|url| args::is_link(url)) {
+            let _ = opened_tx.unbounded_send(url);
+        }
+    });
     // A window closed to the tray, or with the red button, comes back from the Dock icon.
     application.on_reopen(|cx| {
         if main_window(cx).is_none() && cx.has_global::<Booted>() {
@@ -139,10 +162,15 @@ fn main() -> anyhow::Result<()> {
             return;
         }
         store::init(cx);
+        pause_on_quit(cx);
         if args.offline {
             store::SourcesModel::global(cx)
                 .update(cx, |sources, cx| sources.offline_on_connect(cx));
         }
+        if let Some(path) = relay {
+            link::relay::listen(path, relayed, cx);
+        }
+        links::follow(args.link, opened, boot, cx);
         metadata_dialog::register(cx);
         settings_sources::register(cx);
         settings_interface::init(cx);
@@ -187,14 +215,32 @@ fn main() -> anyhow::Result<()> {
                 // After the preferences load, since the registry reads the saved keystroke overrides.
                 commands::keymap(cx);
                 cx.set_global(Booted);
+                let _ = booted.send(());
                 open_main_window(started, None, cx);
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                 tray::init(cx);
             });
         })
         .detach();
     });
     Ok(())
+}
+
+/// The kopuzd this app starts lives on while music plays, so quitting the app pauses it; a daemon reached through `KOPUZ_SOCKET` or `KOPUZ_DAEMON_ADDR` is left alone.
+fn pause_on_quit(cx: &mut App) {
+    if !link::Link::global(cx).starts_own() {
+        return;
+    }
+    cx.on_app_quit(|cx| {
+        let pause = link::Link::global(cx)
+            .call(|api| async move { api.player_command(api::PlayerCommand::Pause).await });
+        async move {
+            if let Err(error) = pause.await {
+                tracing::warn!(%error, "could not pause playback on quit");
+            }
+        }
+    })
+    .detach();
 }
 
 /// The app is set up and the main window may be opened again after it was closed.

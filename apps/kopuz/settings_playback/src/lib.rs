@@ -34,6 +34,7 @@ const LYRICS_OFFSET_STEP_MS: f32 = 50.0;
 pub struct PlaybackSettings {
     artwork: Entity<SchemaForm>,
     artwork_settings: Entity<Query<Vec<FieldSpec>>>,
+    output_devices: Entity<Query<Vec<api::OutputDevice>>>,
     crossfade: Entity<SliderState>,
     volume_scroll: Entity<SliderState>,
     lyrics_offset: Entity<SliderState>,
@@ -79,6 +80,8 @@ impl PlaybackSettings {
         let artwork = cx.new(|cx| SchemaForm::new(Vec::new(), window, cx));
         let artwork_settings =
             cx.new(|cx| Query::new(&[], |api| async move { api.artwork_settings().await }, cx));
+        let output_devices =
+            cx.new(|cx| Query::new(&[], |api| async move { api.output_devices().await }, cx));
         let equalizer = cx.new(|cx| Equalizer::new(window, cx));
         let (preamp, preamp_moved) =
             replay_gain::gain_slider(gain.preamp_db, |gain, db| gain.preamp_db = db, cx);
@@ -95,6 +98,7 @@ impl PlaybackSettings {
             cx.observe(&player, |_, _, cx| cx.notify()),
             // Which player rows show is the active source's answer.
             cx.observe(&SourcesModel::global(cx), |_, _, cx| cx.notify()),
+            cx.observe(&output_devices, |_, _, cx| cx.notify()),
             preamp_moved,
             fallback_moved,
             cx.observe_in(&artwork_settings, window, Self::adopt_artwork),
@@ -132,6 +136,7 @@ impl PlaybackSettings {
             section: None,
             artwork,
             artwork_settings,
+            output_devices,
             crossfade,
             volume_scroll,
             lyrics_offset,
@@ -244,6 +249,7 @@ impl PlaybackSettings {
         let config = model.read(cx).config();
         let prefer_local = config.lyrics.prefer_local_lyrics;
         let musixmatch = config.lyrics.enable_musixmatch_lyrics;
+        let romanize = config.lyrics.romanize_lyrics;
         let auto = config.lyrics.lyrics_offset_auto;
         let latency_ms = PlayerModel::global(cx)
             .read(cx)
@@ -279,6 +285,17 @@ impl PlaybackSettings {
                 )
                 .bind("enable_musixmatch_lyrics", cx)
                 .description(t("enable_musixmatch_lyrics_description"))
+                .shown(cx),
+            )
+            .children(
+                toggle_row(
+                    "romanize_lyrics",
+                    t("romanize_lyrics"),
+                    romanize,
+                    ConfigModel::writer(|on| SettingsEdit::Lyrics(LyricsEdit::RomanizeLyrics(on))),
+                )
+                .bind("romanize_lyrics", cx)
+                .description(t("romanize_lyrics_description"))
                 .shown(cx),
             )
             .children(
@@ -322,6 +339,19 @@ impl PlaybackSettings {
         let channel_mode = config.playback.channel_mode;
         let device_change = config.playback.device_change_behavior;
         let sample_rate = config.playback.sample_rate_mode;
+        let output_device = config.playback.output_device.clone();
+        let listed = self
+            .output_devices
+            .read(cx)
+            .value()
+            .map_or(&[][..], Vec::as_slice);
+        let devices = output_device_options(listed, output_device.as_deref());
+        let exclusive = config.playback.exclusive_output;
+        // Only a device the daemon can hold alone offers it; one left on stays so it can be turned off.
+        let offers_exclusive = exclusive
+            || listed
+                .iter()
+                .any(|device| device.exclusive && Some(&device.id) == output_device.as_ref());
         let autoplay_radio = config.playback.autoplay_radio;
         let skip_explicit = config.playback.skip_explicit;
         let stream_quality = config.playback.stream_quality;
@@ -452,6 +482,34 @@ impl PlaybackSettings {
                     )
                     .shown(cx),
             )
+            .children(
+                SettingRow::new(t("output_device"))
+                    .bind("output_device", cx)
+                    .description(t("output_device_description"))
+                    .setting(
+                        Choice::new("output_device", output_device, devices).on_change(
+                            ConfigModel::writer(|device| {
+                                SettingsEdit::Playback(PlaybackEdit::OutputDevice(device))
+                            }),
+                        ),
+                    )
+                    .shown(cx),
+            )
+            .when(offers_exclusive, |section| {
+                section.children(
+                    toggle_row(
+                        "exclusive_output",
+                        t("exclusive_output"),
+                        exclusive,
+                        ConfigModel::writer(|on| {
+                            SettingsEdit::Playback(PlaybackEdit::ExclusiveOutput(on))
+                        }),
+                    )
+                    .bind("exclusive_output", cx)
+                    .description(t("exclusive_output_description"))
+                    .shown(cx),
+                )
+            })
             .children(
                 SettingRow::new(t("sample_rate_mode"))
                     .bind("sample_rate_mode", cx)
@@ -588,6 +646,11 @@ fn preview_due(cx: &mut App) -> bool {
 impl PlaybackSettings {
     /// Which rail entry is showing; `None` stacks every section.
     pub fn show(&mut self, section: Option<SharedString>, cx: &mut Context<Self>) {
+        if section.as_deref().is_none_or(|shown| shown == "player") {
+            // Devices come and go with cables, so the list is read again each time the panel opens.
+            self.output_devices
+                .update(cx, |query, cx| query.refresh(cx));
+        }
         self.section = section;
         cx.notify();
     }
@@ -651,6 +714,25 @@ fn device_change_label(behavior: DeviceChangeBehavior) -> SharedString {
         DeviceChangeBehavior::Resume => "device_change_resume",
         DeviceChangeBehavior::Pause => "device_change_pause",
     })
+}
+
+/// "System default" first, then every device; a chosen device that is unplugged still shows as itself.
+fn output_device_options(
+    devices: &[api::OutputDevice],
+    current: Option<&str>,
+) -> Vec<(Option<String>, SharedString)> {
+    let mut options = vec![(None, t("output_device_system_default"))];
+    options.extend(
+        devices
+            .iter()
+            .map(|device| (Some(device.id.clone()), device.name.clone().into())),
+    );
+    if let Some(current) = current
+        && !devices.iter().any(|device| device.id == current)
+    {
+        options.push((Some(current.to_string()), current.to_string().into()));
+    }
+    options
 }
 
 fn sample_rate_label(mode: SampleRateMode) -> SharedString {

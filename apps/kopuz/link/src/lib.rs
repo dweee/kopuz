@@ -1,6 +1,7 @@
 //! The one seam to a Kopuz daemon: a gRPC client on its own tokio runtime, supervised as a GPUI entity.
 
 mod daemon_process;
+pub mod relay;
 mod replace;
 
 use std::future::Future;
@@ -182,6 +183,27 @@ impl<T> Future for Call<T> {
             })
         })
     }
+}
+
+/// One call to the daemon at `address` from a process that opens no window, given up after `patience`.
+pub fn call_once<T, Fut>(
+    address: &Address,
+    patience: Duration,
+    f: impl FnOnce(Arc<dyn KopuzApi>) -> Fut,
+) -> anyhow::Result<T>
+where
+    Fut: Future<Output = Result<T, ApiError>>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let api: Arc<dyn KopuzApi> = match address {
+            Address::Socket(path) => Arc::new(client::GrpcApi::new(path.clone())?),
+            Address::Tcp(host) => Arc::new(client::GrpcApi::connect_tcp(host.clone())?),
+        };
+        Ok(tokio::time::timeout(patience, f(api)).await??)
+    })
 }
 
 /// Connect to and supervise the daemon at `address`, before any window opens; `start_own` starts this app's own kopuzd on a free socket.

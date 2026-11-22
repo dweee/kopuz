@@ -292,6 +292,19 @@ struct DiscordState {
     cover_song_key: String,
     cover_lookup_attempted: bool,
     cover_task: Option<tokio::task::JoinHandle<()>>,
+    /// The song and what follows it, when the active source can put them in a link.
+    listen: Option<Listen>,
+    listen_shown: bool,
+    db: db::Db,
+    sources: watch::Receiver<Arc<server::sources::Sources>>,
+}
+
+type Listen = (config::MusicService, Vec<String>);
+
+/// What a lookup for the playing song came back with.
+enum Found {
+    Cover(Option<String>),
+    Listen(Option<Listen>),
 }
 
 impl DiscordState {
@@ -300,6 +313,36 @@ impl DiscordState {
             task.abort();
         }
     }
+
+    fn wants_listen(&self, options: PresenceOptions) -> bool {
+        options.listen_button && self.listen.is_some()
+    }
+}
+
+/// The song `key` and what plays after it, when the active source's keys mean the same song on another install.
+fn listen_queue(
+    db: db::Db,
+    sources: &server::sources::Sources,
+    mirror: &crate::session::QueueMirrorSnapshot,
+    key: &str,
+) -> Option<Listen> {
+    let service = sources.active_service()?;
+    if !server::source::active(db, sources).listen_links() {
+        return None;
+    }
+    let start = match mirror.tracks.get(mirror.position) {
+        Some(track) if track.id.key() == key => mirror.position,
+        _ => mirror
+            .tracks
+            .iter()
+            .position(|track| track.id.key() == key)?,
+    };
+    let keys: Vec<String> = mirror.tracks[start..]
+        .iter()
+        .filter(|track| track.id.service() == Some(service))
+        .map(|track| track.id.key().into_owned())
+        .collect();
+    (keys.first().map(String::as_str) == Some(key)).then_some((service, keys))
 }
 
 impl Drop for DiscordState {
@@ -312,6 +355,7 @@ impl Drop for DiscordState {
 /// are keyed by track so late responses cannot overwrite the current picture.
 pub fn spawn_discord_presence(
     session: &SessionHandle,
+    db: db::Db,
     mut config: watch::Receiver<config::Settings>,
     sources: watch::Receiver<Arc<server::sources::Sources>>,
     mut paused: watch::Receiver<bool>,
@@ -326,8 +370,7 @@ pub fn spawn_discord_presence(
         ) {
             return;
         }
-        let (cover_tx, mut cover_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+        let (cover_tx, mut cover_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Found)>();
         let mut discord = DiscordState {
             last_title: String::new(),
             was_playing: false,
@@ -338,6 +381,10 @@ pub fn spawn_discord_presence(
             cover_song_key: String::new(),
             cover_lookup_attempted: false,
             cover_task: None,
+            listen: None,
+            listen_shown: false,
+            db,
+            sources: sources.clone(),
         };
         let mut last_state: Option<(Box<PlayerState>, Instant)> = None;
         let mut keepalive = tokio::time::interval(Duration::from_secs(DISCORD_TICK_SECS));
@@ -359,11 +406,16 @@ pub fn spawn_discord_presence(
                     last_state = Some((state, received));
                 }
                 resolved = cover_rx.recv() => {
-                    let Some((song_key, url)) = resolved else { break };
+                    let Some((song_key, found)) = resolved else { break };
                     if song_key == discord.cover_song_key {
-                        discord.cover_task.take();
-                        discord.cover = url;
-                        discord.cover_sent = false;
+                        match found {
+                            Found::Cover(url) => {
+                                discord.cover_task.take();
+                                discord.cover = url;
+                                discord.cover_sent = false;
+                            }
+                            Found::Listen(listen) => discord.listen = listen,
+                        }
                         if let Some((state, received)) = &last_state {
                             let service = sources.borrow().active_service();
                             let options = PresenceOptions::of(&config.borrow(), &paused);
@@ -393,7 +445,9 @@ pub fn spawn_discord_presence(
                         continue;
                     }
                     let options = PresenceOptions::of(&config.borrow(), &paused);
-                    if options.enabled == presence.is_some() {
+                    if options.enabled == presence.is_some()
+                        && discord.wants_listen(options) == discord.listen_shown
+                    {
                         continue;
                     }
                     let kept = match &last_state {
@@ -452,7 +506,7 @@ fn present(
     received: Instant,
     discord: &mut DiscordState,
     session: &SessionHandle,
-    cover_tx: &tokio::sync::mpsc::UnboundedSender<(String, Option<String>)>,
+    cover_tx: &tokio::sync::mpsc::UnboundedSender<(String, Found)>,
 ) -> bool {
     if options.enabled && !hold_connection(slot, true) {
         return false;
@@ -478,6 +532,7 @@ struct PresenceOptions {
     paused: bool,
     source: bool,
     upload_cover: bool,
+    listen_button: bool,
 }
 
 impl PresenceOptions {
@@ -490,6 +545,10 @@ impl PresenceOptions {
                 .integrations
                 .discord_presence_upload_cover
                 .unwrap_or(false),
+            listen_button: config
+                .integrations
+                .discord_presence_listen_button
+                .unwrap_or(true),
         }
     }
 }
@@ -502,7 +561,7 @@ fn project(
     received: Instant,
     discord: &mut DiscordState,
     session: &SessionHandle,
-    cover_tx: &tokio::sync::mpsc::UnboundedSender<(String, Option<String>)>,
+    cover_tx: &tokio::sync::mpsc::UnboundedSender<(String, Found)>,
 ) {
     let enabled = options.enabled;
     let paused_enabled = options.paused;
@@ -524,6 +583,7 @@ fn project(
         discord.cover_lookup_attempted = false;
         discord.cover = None;
         discord.cover_sent = false;
+        discord.listen = None;
     }
     if !enabled {
         discord.cancel_cover_lookup();
@@ -538,6 +598,18 @@ fn project(
     } else {
         interpolated_ms(state, received) / 1000
     };
+    let listen_url = discord
+        .listen
+        .as_ref()
+        .filter(|_| options.listen_button)
+        .and_then(|(service, keys)| {
+            crate::listen_link::ListenLink::url(
+                *service,
+                crate::listen_link::At::now(progress_secs, playing),
+                keys.iter().map(String::as_str),
+            )
+        });
+    let listen_changed = listen_url.is_some() != discord.listen_shown;
 
     if playing {
         if enabled && !title.is_empty() && !discord.cover_lookup_attempted {
@@ -547,15 +619,22 @@ fn project(
             let session = session.clone();
             let key = track.map(|t| t.key.clone()).unwrap_or_default();
             let upload_cover = options.upload_cover;
+            let (db, sources) = (discord.db.clone(), discord.sources.borrow().clone());
             discord.cover_task = Some(tokio::spawn(async move {
-                let track = session.queued_track(&key).await;
+                let mirror = session.queue_mirror().await;
+                let listen = listen_queue(db, &sources, &mirror, &key);
+                let _ = tx.send((song_key.clone(), Found::Listen(listen)));
+                let track = mirror
+                    .tracks
+                    .into_iter()
+                    .find(|track| track.id.key() == key);
                 let local_path = track
                     .as_ref()
                     .and_then(|track| track.id.local_path())
                     .map(std::path::Path::to_path_buf);
                 let resolved = match track
                     .as_ref()
-                    .and_then(discord_presence::cover_art::youtube_cover_art_url)
+                    .and_then(discord_presence::cover_art::source_cover_art_url)
                 {
                     Some(url) => Some(url),
                     None if session.offline().offline_mode() => None,
@@ -576,7 +655,7 @@ fn project(
                         }
                     }
                 };
-                let _ = tx.send((song_key, resolved));
+                let _ = tx.send((song_key, Found::Cover(resolved)));
             }));
         }
         if enabled {
@@ -584,9 +663,16 @@ fn project(
             let resumed = !discord.was_playing;
             let toggled_on = !discord.last_enabled;
             let cover_just_resolved = discord.cover.is_some() && !discord.cover_sent;
-            if song_changed || resumed || toggled_on || cover_just_resolved || source_changed {
+            if song_changed
+                || resumed
+                || toggled_on
+                || cover_just_resolved
+                || source_changed
+                || listen_changed
+            {
                 discord.last_title = title.clone();
                 discord.last_source = source_name.clone();
+                discord.listen_shown = listen_url.is_some();
                 let _ = presence.set_now_playing(
                     &title,
                     &artist,
@@ -594,6 +680,7 @@ fn project(
                     progress_secs,
                     duration_secs,
                     discord.cover.as_deref(),
+                    listen_url.as_deref(),
                     source_name.as_deref(),
                 );
                 if discord.cover.is_some() {
@@ -606,11 +693,13 @@ fn project(
     } else if discord.was_playing {
         if enabled && paused_enabled {
             discord.last_source = source_name.clone();
+            discord.listen_shown = listen_url.is_some();
             let _ = presence.set_paused(
                 &title,
                 &artist,
                 &album,
                 discord.cover.as_deref(),
+                listen_url.as_deref(),
                 source_name.as_deref(),
             );
         } else if discord.last_enabled || !paused_enabled {
@@ -619,15 +708,17 @@ fn project(
     } else if !enabled && discord.last_enabled {
         let _ = presence.clear_activity();
     } else if enabled
-        && (!discord.last_enabled || (source_changed && paused_enabled))
+        && (!discord.last_enabled || ((source_changed || listen_changed) && paused_enabled))
         && !title.is_empty()
     {
         discord.last_source = source_name.clone();
+        discord.listen_shown = listen_url.is_some();
         let _ = presence.set_paused(
             &title,
             &artist,
             &album,
             discord.cover.as_deref(),
+            listen_url.as_deref(),
             source_name.as_deref(),
         );
     }
@@ -639,7 +730,6 @@ fn project(
 /// The integration ids a client addresses these by.
 const DISCORD: &str = "discord";
 const LISTENBRAINZ: &str = "listenbrainz";
-const LASTFM: &str = "lastfm";
 const LIBREFM: &str = "librefm";
 
 /// The field keys a form and its answers agree on.
@@ -647,9 +737,8 @@ const PRESENCE: &str = "presence";
 const PAUSED: &str = "paused";
 const PRESENCE_SOURCE: &str = "source";
 const UPLOAD_COVER: &str = "upload_cover";
+const LISTEN_BUTTON: &str = "listen_button";
 const TOKEN: &str = "token";
-const API_KEY: &str = "api_key";
-const API_SECRET: &str = "api_secret";
 
 fn toggle_field(key: &str, config_key: &str, value: bool) -> FieldSpec {
     FieldSpec {
@@ -704,6 +793,17 @@ fn discord(config: &config::Settings, paused: bool) -> IntegrationInfo {
                         .unwrap_or(false),
                 )
             },
+            FieldSpec {
+                help: Some(Text::key("discord_presence_listen_button_help")),
+                ..toggle_field(
+                    LISTEN_BUTTON,
+                    "discord_presence_listen_button",
+                    config
+                        .integrations
+                        .discord_presence_listen_button
+                        .unwrap_or(true),
+                )
+            },
         ],
     }
 }
@@ -728,34 +828,11 @@ fn listenbrainz(credentials: &Credentials) -> IntegrationInfo {
     }
 }
 
-fn lastfm(credentials: &Credentials) -> IntegrationInfo {
-    IntegrationInfo {
-        id: LASTFM.to_string(),
-        name: Text::key("lastfm"),
-        icon: Icon::Class("fa-brands fa-lastfm".into()),
-        // A session key is what scrobbles; the api key alone only reaches the sign-in page.
-        configured: !credentials.lastfm_session_key.trim().is_empty(),
-        connect: ConnectKind::WebSignIn,
-        fields: vec![
-            secret_field(
-                API_KEY,
-                Text::key("lastfm_api_key_label"),
-                "lastfm_api_key_placeholder",
-            ),
-            secret_field(
-                API_SECRET,
-                Text::key("lastfm_api_secret_label"),
-                "lastfm_api_secret_placeholder",
-            ),
-        ],
-    }
-}
-
 fn librefm(credentials: &Credentials) -> IntegrationInfo {
     IntegrationInfo {
         id: LIBREFM.to_string(),
         name: Text::key("librefm"),
-        icon: Icon::Class("fa-brands fa-lastfm".into()),
+        icon: Icon::Class("fa-solid fa-music".into()),
         configured: !credentials.librefm_session_key.trim().is_empty(),
         connect: ConnectKind::WebSignIn,
 
@@ -771,7 +848,6 @@ fn all(config: &config::Settings, credentials: &Credentials, paused: bool) -> Ve
         published.push(discord(config, paused));
     }
     published.push(listenbrainz(credentials));
-    published.push(lastfm(credentials));
     published.push(librefm(credentials));
     published
 }
@@ -830,16 +906,16 @@ fn apply_presence(values: &[FieldValue], config: &mut config::Settings) {
         UPLOAD_COVER,
         &mut config.integrations.discord_presence_upload_cover,
     );
+    set_toggle(
+        values,
+        LISTEN_BUTTON,
+        &mut config.integrations.discord_presence_listen_button,
+    );
 }
 
 fn apply_credentials(id: &str, values: &[FieldValue], credentials: &mut Credentials) {
-    match id {
-        LISTENBRAINZ => set_secret(values, TOKEN, &mut credentials.musicbrainz_token),
-        LASTFM => {
-            set_secret(values, API_KEY, &mut credentials.lastfm_api_key);
-            set_secret(values, API_SECRET, &mut credentials.lastfm_api_secret);
-        }
-        _ => {}
+    if id == LISTENBRAINZ {
+        set_secret(values, TOKEN, &mut credentials.musicbrainz_token);
     }
 }
 
@@ -847,11 +923,6 @@ fn apply_credentials(id: &str, values: &[FieldValue], credentials: &mut Credenti
 fn clear_credentials(id: &str, credentials: &mut Credentials) {
     match id {
         LISTENBRAINZ => credentials.musicbrainz_token.clear(),
-        LASTFM => {
-            credentials.lastfm_api_key.clear();
-            credentials.lastfm_api_secret.clear();
-            credentials.lastfm_session_key.clear();
-        }
         LIBREFM => credentials.librefm_session_key.clear(),
         _ => {}
     }
@@ -897,10 +968,8 @@ impl PresencePause {
 
 /// Scrobbling, metadata and presence accounts.
 ///
-/// The credentials for these lived in the settings UI, which meant a Last.fm
-/// api secret sat in a Dioxus signal and the scrobbler that used it ran in the
-/// frontend. They are write-only here: a caller answers a published field list
-/// and asks whether one is configured, never what it holds.
+/// Credentials are write-only: callers answer a published field list and ask
+/// whether an account is configured, never what it holds.
 pub struct IntegrationService {
     config: Arc<crate::config_service::ConfigService>,
     credentials: CredentialStore,
@@ -955,7 +1024,7 @@ impl IntegrationService {
                     .await
                     .map_err(database_error)?;
             }
-            if [PRESENCE, PRESENCE_SOURCE, UPLOAD_COVER]
+            if [PRESENCE, PRESENCE_SOURCE, UPLOAD_COVER, LISTEN_BUTTON]
                 .iter()
                 .any(|key| value_of(&values, key).is_some())
             {
@@ -997,9 +1066,7 @@ impl IntegrationService {
 
     /// Run a service's web sign-in and keep the session key it returns.
     ///
-    /// Last.fm and Libre.fm both hand out a token, open a page for the person
-    /// to approve, then trade the token for a session key -- a browser and a
-    /// poll loop, which is why it is not a frontend's job.
+    /// Libre.fm opens an approval page, then trades the token for a session key.
     pub async fn authenticate(&self, id: &str) -> Result<IntegrationInfo, ApiError> {
         let info = self.info(id).await?;
         if info.connect != ConnectKind::WebSignIn {
@@ -1008,29 +1075,10 @@ impl IntegrationService {
             )
             .because(ErrorReason::ConnectNotOffered));
         }
-        let librefm = id == LIBREFM;
-        let (api_key, api_secret) = if librefm {
-            (
-                scrobble::librefm::API_KEY.to_string(),
-                scrobble::librefm::API_SECRET.to_string(),
-            )
-        } else {
-            let held = self.credentials.snapshot();
-            (held.lastfm_api_key, held.lastfm_api_secret)
-        };
-        if api_key.trim().is_empty() || api_secret.trim().is_empty() {
-            return Err(ApiError::invalid_input("set the API key and secret first")
-                .because(ErrorReason::ApiKeyMissing));
-        }
-        let session_key = web_sign_in(id, &api_key, &api_secret).await?;
+        let session_key =
+            web_sign_in(scrobble::librefm::API_KEY, scrobble::librefm::API_SECRET).await?;
         self.credentials
-            .update(move |credentials| {
-                if librefm {
-                    credentials.librefm_session_key = session_key;
-                } else {
-                    credentials.lastfm_session_key = session_key;
-                }
-            })
+            .update(move |credentials| credentials.librefm_session_key = session_key)
             .await
             .map_err(database_error)?;
         self.info(id).await
@@ -1136,42 +1184,31 @@ async fn listenbrainz_token_from(
 }
 
 /// What a presence write reports as changed, so the session republishes the config.
-const PRESENCE_KEYS: [config::SettingKey; 3] = [
+const PRESENCE_KEYS: [config::SettingKey; 4] = [
     config::SettingKey::Integrations(config::IntegrationsKey::DiscordPresence),
     config::SettingKey::Integrations(config::IntegrationsKey::DiscordPresenceSource),
     config::SettingKey::Integrations(config::IntegrationsKey::DiscordPresenceUploadCover),
+    config::SettingKey::Integrations(config::IntegrationsKey::DiscordPresenceListenButton),
 ];
 
 /// Open the approval page, then poll for the session key. The person has to
 /// click through in a browser, so the wait is generous and bounded.
 #[cfg(not(target_os = "android"))]
-async fn web_sign_in(id: &str, api_key: &str, api_secret: &str) -> Result<String, ApiError> {
-    let librefm = id == LIBREFM;
-    let token = if librefm {
-        scrobble::librefm::get_auth_token(api_key).await
-    } else {
-        scrobble::lastfm::get_auth_token(api_key).await
-    }
-    .map_err(|error| {
-        ApiError::internal(format!("could not start the sign-in: {error}"))
-            .because(ErrorReason::SignInNotStarted)
-    })?;
-    let url = if librefm {
-        scrobble::librefm::auth_url(api_key, &token)
-    } else {
-        scrobble::lastfm::auth_url(api_key, &token)
-    };
+async fn web_sign_in(api_key: &str, api_secret: &str) -> Result<String, ApiError> {
+    let token = scrobble::librefm::get_auth_token(api_key)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("could not start the sign-in: {error}"))
+                .because(ErrorReason::SignInNotStarted)
+        })?;
+    let url = scrobble::librefm::auth_url(api_key, &token);
     webbrowser::open(&url).map_err(|error| {
         ApiError::internal(format!("could not open a browser: {error}"))
             .because(ErrorReason::BrowserNotOpened)
     })?;
     for _ in 0..60 {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let session = if librefm {
-            scrobble::librefm::get_session_key(api_key, api_secret, &token).await
-        } else {
-            scrobble::lastfm::get_session_key(api_key, api_secret, &token).await
-        };
+        let session = scrobble::librefm::get_session_key(api_key, api_secret, &token).await;
         if let Ok(session) = session {
             return Ok(session);
         }
@@ -1181,7 +1218,7 @@ async fn web_sign_in(id: &str, api_key: &str, api_secret: &str) -> Result<String
 }
 
 #[cfg(target_os = "android")]
-async fn web_sign_in(_id: &str, _api_key: &str, _api_secret: &str) -> Result<String, ApiError> {
+async fn web_sign_in(_api_key: &str, _api_secret: &str) -> Result<String, ApiError> {
     Err(
         ApiError::unsupported("web sign-in runs in the app on Android")
             .because(ErrorReason::ConnectNotOffered),
@@ -1333,11 +1370,11 @@ mod tests {
             assert_eq!(refused.code, api::ErrorCode::Unsupported, "{id}");
             assert_eq!(refused.reason, Some(ErrorReason::ConnectNotOffered), "{id}");
         }
-        let keyless = service
-            .authenticate(LASTFM)
+        let removed = service
+            .authenticate("lastfm")
             .await
-            .expect_err("no API key to sign in with");
-        assert_eq!(keyless.reason, Some(ErrorReason::ApiKeyMissing));
+            .expect_err("Last.fm is no longer supported");
+        assert_eq!(removed.code, api::ErrorCode::NotFound);
         let unknown = service
             .authenticate("nope")
             .await

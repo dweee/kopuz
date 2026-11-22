@@ -91,7 +91,9 @@ service Kopuz {
   rpc SetQueue(SetQueueRequest) returns (MutationResult);
   rpc EditQueue(QueueEditRequest) returns (MutationResult);
   rpc GetExternalDevices(ExternalDevicesRequest) returns (ExternalDeviceList);
+  rpc GetOutputDevices(GetOutputDevicesRequest) returns (OutputDeviceList);
   rpc SelectExternalDevice(SelectExternalDeviceRequest) returns (Unit);
+  rpc OpenListenLink(OpenListenLinkRequest) returns (Unit);
   rpc SetFavorite(FavoriteRequest) returns (SetFavoriteResponse);
   rpc DontRecommend(DontRecommendRequest) returns (Unit);
   rpc Rate(RateRequest) returns (Unit);
@@ -127,6 +129,9 @@ service Kopuz {
   rpc PreviewReplayGain(ReplayGainSettings) returns (Unit);
   rpc GetFrontendPrefs(GetFrontendPrefsRequest) returns (FrontendPrefsList);
   rpc SetFrontendPrefs(SetFrontendPrefsRequest) returns (Unit);
+  rpc GetPlugins(GetPluginsRequest) returns (PluginCatalog);
+  rpc InstallPlugin(InstallPluginRequest) returns (PluginInfo);
+  rpc UninstallPlugin(PluginId) returns (Unit);
 
   rpc GetSources(GetSourcesRequest) returns (SourceList);
   rpc GetServices(GetServicesRequest) returns (ServiceList);
@@ -469,7 +474,26 @@ message ExternalDeviceList {
   repeated ExternalDevice devices = 1;
 }
 
+message GetOutputDevicesRequest {}
+
+// An audio output the daemon's own player can open; id is what the output_device setting stores.
+message OutputDevice {
+  string id = 1;
+  string name = 2;
+  bool is_default = 3;
+  // It can be held alone, which exclusive_output then does.
+  bool exclusive = 4;
+}
+
+message OutputDeviceList {
+  repeated OutputDevice devices = 1;
+}
+
 // Absent device_id moves playback back to this app's own player.
+message OpenListenLinkRequest {
+  string link = 1;
+}
+
 message SelectExternalDeviceRequest {
   string source_id = 1;
   optional string device_id = 2;
@@ -1664,6 +1688,8 @@ message TrackInfo {
   optional uint64 duration_ms = 7;
   uint32 khz = 8;
   uint32 bitrate = 9;
+  // Bits per sample of lossless audio; 0 for lossy audio or when unknown.
+  uint32 bit_depth = 28;
   optional uint32 track_number = 10;
   optional uint32 disc_number = 11;
   TrackKind kind = 12;
@@ -1725,6 +1751,8 @@ message Stats {
 message Lyrics {
   optional string plain = 1;
   repeated LyricLine synced = 2;
+  // One reading per line of `plain`, empty for a line that has none.
+  repeated string plain_romanized = 3;
 }
 
 message LyricLine {
@@ -1736,6 +1764,7 @@ message LyricLine {
   optional uint32 parent_line_index = 5;
   bool background = 6;
   bool opposite_turn = 7;
+  optional string romanized = 8;
 }
 
 message LyricChunk {
@@ -1933,6 +1962,8 @@ message ConfigEdit {
     ReplayGainSettings replay_gain = 70;
     DeviceChangeBehavior device_change_behavior = 46;
     SampleRateMode sample_rate_mode = 47;
+    OptionalString output_device = 90;
+    bool exclusive_output = 91;
     StreamQuality stream_quality = 72;
     bool autoplay_radio = 73;
     bool skip_explicit = 74;
@@ -1956,6 +1987,7 @@ message ConfigEdit {
     string custom_background_path = 31;
     bool prefer_local_lyrics = 63;
     bool enable_musixmatch_lyrics = 64;
+    bool romanize_lyrics = 89;
     int32 lyrics_offset_ms = 65;
     bool lyrics_offset_auto = 66;
     bool lyrics_depth_blur = 67;
@@ -1968,6 +2000,7 @@ message ConfigEdit {
     OptionalBool discord_presence = 79;
     OptionalBool discord_presence_source = 80;
     OptionalBool discord_presence_upload_cover = 87;
+    OptionalBool discord_presence_listen_button = 88;
     RadioRegistryOp radio_registries = 61;
     string downloader_output_dir = 76;
     DownloaderOptions downloader_options = 77;
@@ -1979,6 +2012,7 @@ message ConfigEdit {
     StringList connectivity_check_urls = 83;
     bool offline_cache_enabled = 84;
     uint64 offline_cache_max_bytes = 85;
+    string listen_address = 86;
   }
 }
 
@@ -2081,6 +2115,7 @@ enum SettingKey {
   SETTING_KEY_RADIO_REGISTRIES = 61;
   SETTING_KEY_PREFER_LOCAL_LYRICS = 63;
   SETTING_KEY_ENABLE_MUSIXMATCH_LYRICS = 64;
+  SETTING_KEY_ROMANIZE_LYRICS = 89;
   SETTING_KEY_LYRICS_OFFSET_MS = 65;
   SETTING_KEY_LYRICS_OFFSET_AUTO = 66;
   SETTING_KEY_LYRICS_DEPTH_BLUR = 67;
@@ -2101,7 +2136,11 @@ enum SettingKey {
   SETTING_KEY_CONNECTIVITY_CHECK_URLS = 83;
   SETTING_KEY_OFFLINE_CACHE_ENABLED = 84;
   SETTING_KEY_OFFLINE_CACHE_MAX_BYTES = 85;
+  SETTING_KEY_LISTEN_ADDRESS = 86;
   SETTING_KEY_DISCORD_PRESENCE_UPLOAD_COVER = 87;
+  SETTING_KEY_DISCORD_PRESENCE_LISTEN_BUTTON = 88;
+  SETTING_KEY_OUTPUT_DEVICE = 90;
+  SETTING_KEY_EXCLUSIVE_OUTPUT = 91;
 }
 
 message GetFrontendPrefsRequest {
@@ -2127,6 +2166,65 @@ message PrefEntry {
 message SetFrontendPrefsRequest {
   string frontend = 1;
   repeated PrefEntry entries = 2;
+}
+
+// ---------------- plugins ----------------
+
+message GetPluginsRequest {}
+
+message PluginId {
+  string id = 1;
+}
+
+message InstallPluginRequest {
+  string id = 1;
+  // The hosts the user was shown and agreed to; a plugin reaching any other
+  // set is refused.
+  repeated string network = 2;
+}
+
+// A newer version of an installed plugin, from the marketplace or dropped
+// into the plugin directory.
+message PluginUpdate {
+  string version = 1;
+  // Everything it reaches; installing it agrees to these.
+  repeated string network = 2;
+  // What it reaches that the installed version does not.
+  repeated string added_hosts = 3;
+}
+
+enum PluginOrigin {
+  PLUGIN_ORIGIN_UNSPECIFIED = 0;
+  PLUGIN_ORIGIN_OFFICIAL = 1;
+  PLUGIN_ORIGIN_COMMUNITY = 2;
+}
+
+// One plugin, as installed, as the marketplace lists it, or both.
+message PluginInfo {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string author = 4;
+  optional string homepage = 5;
+  PluginOrigin origin = 6;
+  // Unset when it is not installed.
+  optional string installed_version = 7;
+  // Unset when the marketplace lists none.
+  optional string available_version = 8;
+  repeated string services = 9;
+  repeated string network = 10;
+  bool sandboxed = 11;
+  optional PluginUpdate update = 12;
+  // From a Flatpak extension or a system package, which removes it.
+  bool system = 13;
+  // Reads the files in the folders picked for each of its sources.
+  bool reads_folders = 14;
+}
+
+message PluginCatalog {
+  repeated PluginInfo plugins = 1;
+  // Set when the marketplace could not be read.
+  optional string marketplace_error = 2;
 }
 
 
@@ -2223,6 +2321,7 @@ message Config {
   repeated RegistryEntry radio_registries = 61;
   bool prefer_local_lyrics = 63;
   bool enable_musixmatch_lyrics = 64;
+  bool romanize_lyrics = 89;
   int32 lyrics_offset_ms = 65;
   bool lyrics_offset_auto = 66;
   bool lyrics_depth_blur = 67;
@@ -2238,6 +2337,7 @@ message Config {
   optional bool discord_presence = 79;
   optional bool discord_presence_source = 80;
   optional bool discord_presence_upload_cover = 87;
+  optional bool discord_presence_listen_button = 88;
   optional string spotify_browser = 81;
   bool spotify_prefer_active_device = 82;
   string downloader_output_dir = 76;
@@ -2247,6 +2347,10 @@ message Config {
   // Both absent from a peer that predates them, which must read as the defaults: on, and 5 GB.
   optional bool offline_cache_enabled = 84;
   optional uint64 offline_cache_max_bytes = 85;
+  string listen_address = 86;
+  // Absent means the system default output.
+  optional string output_device = 90;
+  bool exclusive_output = 91;
 }
 
 message DownloaderOptions {
@@ -2286,11 +2390,10 @@ enum DeviceChangeBehavior {
 }
 
 enum FetchStrategy {
+  reserved 1, 2, 4;
+  reserved "FETCH_STRATEGY_MUSIC_BRAINZ_FIRST", "FETCH_STRATEGY_LAST_FM_FIRST", "FETCH_STRATEGY_LAST_FM_ONLY";
   FETCH_STRATEGY_UNSPECIFIED = 0;
-  FETCH_STRATEGY_MUSIC_BRAINZ_FIRST = 1;
-  FETCH_STRATEGY_LAST_FM_FIRST = 2;
   FETCH_STRATEGY_MUSIC_BRAINZ_ONLY = 3;
-  FETCH_STRATEGY_LAST_FM_ONLY = 4;
 }
 
 enum OfflineQuality {
@@ -2561,6 +2664,7 @@ enum Table {
   TABLE_RECENTS = 7;
   TABLE_STATIONS = 8;
   TABLE_ARTISTS = 9;
+  TABLE_PLUGINS = 10;
 }
 
 enum JobKind {

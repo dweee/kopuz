@@ -256,10 +256,17 @@ impl MediaSource for YtSource {
     }
 
     async fn more_radio(&self, cursor: &str) -> Result<RadioPage, SourceError> {
-        let (playlist_id, token) = cursor
-            .split_once(RADIO_CURSOR_SEPARATOR)
-            .ok_or_else(|| SourceError::InvalidInput("not a YouTube Music radio cursor".into()))?;
-        let page = self.client.mix_continuation(playlist_id, token).await?;
+        let mut parts = cursor.splitn(3, RADIO_CURSOR_SEPARATOR);
+        let (Some(playlist_id), Some(token)) = (parts.next(), parts.next()) else {
+            return Err(SourceError::InvalidInput(
+                "not a YouTube Music radio cursor".into(),
+            ));
+        };
+        let artist = parts.next();
+        let page = self
+            .client
+            .mix_continuation(playlist_id, token, artist)
+            .await?;
         // A continuation page may leave the playlist id out; the mix is the same one.
         Ok(radio_page(crate::ytmusic::mix::MixPage {
             playlist_id: page.playlist_id.clone().or(Some(playlist_id.to_string())),
@@ -285,6 +292,10 @@ impl MediaSource for YtSource {
     fn playlist_web_url(&self, playlist_id: &str) -> Option<String> {
         let id = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
         (!id.trim().is_empty()).then(|| format!("https://music.youtube.com/playlist?list={id}"))
+    }
+
+    fn listen_links(&self) -> bool {
+        true
     }
 
     async fn fetch_track(&self, item_id: &str) -> Result<Option<reader::Track>, SourceError> {
@@ -652,6 +663,7 @@ impl MediaSource for YtSource {
             player::AudioFormat::M4a => crate::stream::AudioFormat::M4a,
         };
         Ok(StreamInfo {
+            guard: None,
             url: info.url,
             format: Some((format, info.range_safe)),
             user_agent: Some(info.user_agent),
@@ -914,11 +926,19 @@ fn send_report(cookies: String, page_id: Option<String>, url: String) {
 /// carries both. Neither an `RD…` id nor a token contains a space.
 const RADIO_CURSOR_SEPARATOR: char = ' ';
 
+/// The cursor is the mix id and its continuation token, then the channel a
+/// shuffle is kept to when there is one.
 fn radio_page(page: crate::ytmusic::mix::MixPage) -> RadioPage {
+    let artist = page.artist;
     let more = page
         .playlist_id
         .zip(page.continuation)
-        .map(|(playlist_id, token)| format!("{playlist_id}{RADIO_CURSOR_SEPARATOR}{token}"));
+        .map(|(playlist_id, token)| match artist {
+            Some(artist) => format!(
+                "{playlist_id}{RADIO_CURSOR_SEPARATOR}{token}{RADIO_CURSOR_SEPARATOR}{artist}"
+            ),
+            None => format!("{playlist_id}{RADIO_CURSOR_SEPARATOR}{token}"),
+        });
     RadioPage {
         tracks: page.tracks,
         more,
@@ -943,9 +963,25 @@ mod tests {
             apple_music_language: String::new(),
             folders: Vec::new(),
             account: None,
+            plugin_service: None,
         };
         let src = YtSource::new(db, Source::Server("test".to_string()), &conn);
         (src, dir)
+    }
+
+    #[test]
+    fn a_shuffle_cursor_carries_the_channel_it_is_kept_to() {
+        let page = |artist: Option<&str>| crate::ytmusic::mix::MixPage {
+            tracks: Vec::new(),
+            playlist_id: Some("RDAOabc".into()),
+            continuation: Some("tok".into()),
+            artist: artist.map(str::to_string),
+        };
+        assert_eq!(
+            radio_page(page(Some("UCada"))).more.as_deref(),
+            Some("RDAOabc tok UCada")
+        );
+        assert_eq!(radio_page(page(None)).more.as_deref(), Some("RDAOabc tok"));
     }
 
     /// A ping as the anonymous identity would link it to whoever signs in next.

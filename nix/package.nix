@@ -7,10 +7,15 @@
   ...
 }:
 let
+  # cargoSetupHook asks zstd-sys for a static system library in the CLI build.
+  dioxusCli = pkgs.dioxus-cli.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [ (pkgs.zstd.override { enableStatic = true; }) ];
+  });
   # Upstream's recipe from this fork's own tree (it carries upstream history),
   # so evaluation imports no fetched source.
   upstream = pkgs.callPackage ../packaging/nix/crane.nix {
     inherit craneLib gitRev;
+    dioxus-cli = dioxusCli;
   };
   cargoVendorDir = craneLib.vendorCargoDeps { src = source; };
   # CMake build trees retain absolute sandbox paths in inherited Cargo artifacts.
@@ -38,7 +43,7 @@ let
   });
   compiled = upstream.overrideAttrs (old: {
     inherit cargoVendorDir;
-    version = "0.68.0-qobuz";
+    version = "${old.version}-qobuz";
     src = source;
     preBuild = (old.preBuild or "") + clearOpusCMakeCache;
     __intentionallyOverridingVersion = true;

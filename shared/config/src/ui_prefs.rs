@@ -27,11 +27,15 @@ pub struct UiPrefs {
     pub artists_view_mode: AlbumViewMode,
     pub artist_view_order: ArtistViewOrder,
     pub sidebar_order: Vec<String>,
+    /// The sidebar's list of playlists is folded under its heading.
+    pub sidebar_playlists_collapsed: bool,
     pub home_sections: Vec<HomeSection>,
     /// Home while the active source has a catalog of its own.
     pub catalog_home_sections: Vec<HomeSection>,
     pub listen_now_style: ListenNowStyle,
     pub hero_height: u32,
+    /// Track lists show a column with each track's bit depth and sample rate.
+    pub show_quality_column: bool,
 }
 
 impl Default for UiPrefs {
@@ -59,10 +63,12 @@ impl Default for UiPrefs {
             artists_view_mode: AlbumViewMode::Grid,
             artist_view_order: ArtistViewOrder::Tracks,
             sidebar_order: default_sidebar_order(),
+            sidebar_playlists_collapsed: false,
             home_sections: default_home_sections(),
             catalog_home_sections: default_catalog_home_sections(),
             listen_now_style: ListenNowStyle::List,
             hero_height: 300,
+            show_quality_column: false,
         }
     }
 }
@@ -175,6 +181,7 @@ mod tests {
             )],
             hero_height: 420,
             listen_now_style: ListenNowStyle::Cards,
+            show_quality_column: true,
             ..UiPrefs::default()
         };
         let entries = prefs.entries();

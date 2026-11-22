@@ -1,7 +1,7 @@
 name: Sync and test upstream
 'on':
   schedule:
-  - cron: 17 */6 * * *
+  - cron: "23 */6 * * *"
   workflow_dispatch: null
   repository_dispatch:
     types:
@@ -16,9 +16,9 @@ jobs:
       contents: write
       actions: write
       checks: read
-    uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@74b21a2904ac5f6d6750f2f52f3a36f86b0b6651
+    uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@7f7b0ab6bb4f3a8d44d45f3f42b4ce48f8c530ea
     with:
       tool-repository: dweee/dave-fork-ci
-      tool-revision: 74b21a2904ac5f6d6750f2f52f3a36f86b0b6651
-      auto-merge: ${{ vars.FORK_CI_AUTO_MERGE == 'true' && (vars.NIKS3_PUSH_ENABLED || vars.ATTIC_PUSH_ENABLED) == 'true' }}
+      tool-revision: 7f7b0ab6bb4f3a8d44d45f3f42b4ce48f8c530ea
+      auto-merge: ${{ vars.FORK_CI_AUTO_MERGE == 'true' && vars.NIKS3_PUSH_ENABLED == 'true' }}
       cache: false

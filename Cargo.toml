@@ -1,12 +1,13 @@
 [workspace]
-members = ["shared/*", "daemon/*", "apps/common/*", "apps/cli", "apps/legacy/*", "apps/kopuz/*"]
-exclude = ["vendor/*", "apps/kopuz/.claude", "apps/kopuz/docs", "apps/kopuz/scripts"]
+members = ["shared/*", "daemon/*", "daemon/plugins/sdk", "daemon/plugins/subsonic", "daemon/plugins/jellyfin", "daemon/plugins/clippsly", "daemon/plugins/soundcloud", "daemon/plugins/examples/internet-archive", "apps/common/*", "apps/cli", "apps/legacy/*", "apps/kopuz/*"]
+# daemon/plugins holds crates but is not one; its crates are listed by name.
+exclude = ["vendor/*", "daemon/plugins", "apps/kopuz/.claude", "apps/kopuz/docs", "apps/kopuz/scripts"]
 # A bare `cargo build` skips the legacy Dioxus app; build it with `just build` or `-p kopuz-legacy`.
-default-members = ["shared/*", "daemon/*", "apps/common/*", "apps/cli", "apps/kopuz/*"]
+default-members = ["shared/*", "daemon/*", "daemon/plugins/sdk", "daemon/plugins/subsonic", "daemon/plugins/jellyfin", "daemon/plugins/clippsly", "daemon/plugins/soundcloud", "daemon/plugins/examples/internet-archive", "apps/common/*", "apps/cli", "apps/kopuz/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.68.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.95.0"
 description = "A modern, lightweight music player built with Rust and Dioxus."
@@ -132,28 +133,51 @@ time = "0.3"
 # pins deno_core ^0.331, so deno_core must stay on 0.331.x to share one V8 link.
 deno_core = "0.331"
 rustypipe-botguard = "0.1.2"
+# Plugin runtime. 48 is the newest release whose MSRV the pinned toolchain meets.
+wasmtime = { version = "48", default-features = false, features = [
+  "component-model",
+  "async",
+  "cranelift",
+  "runtime",
+  "std",
+  "parallel-compilation",
+] }
+wasmtime-wasi = { version = "48", default-features = false, features = ["p2"] }
+wit-bindgen = "0.63"
+url = "2.5"
+# Lyrics romanization: per-script tables, and a MeCab tokenizer for Japanese whose
+# IPADIC dictionary the daemon downloads and compiles on first use.
+wana_kana = { version = "5", default-features = false }
+vibrato = { version = "0.5", default-features = false }
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+pinyin = { version = "0.11", default-features = false, features = ["with_tone"] }
+any_ascii = "0.3"
+unicode-script = "0.5"
 
 # Workspace components
-i18n = { package = "kopuz-i18n", version = "0.68.0", path = "./apps/common/i18n" }
-player = { package = "kopuz-player", version = "0.68.0", path = "./daemon/player" }
-reader = { package = "kopuz-reader", version = "0.68.0", path = "./daemon/reader" }
-components = { package = "kopuz-components", version = "0.68.0", path = "./apps/legacy/components" }
-hooks = { package = "kopuz-hooks", version = "0.68.0", path = "./apps/legacy/hooks" }
-pages = { package = "kopuz-pages", version = "0.68.0", path = "./apps/legacy/pages" }
-utils = { package = "kopuz-utils", version = "0.68.0", path = "./shared/utils" }
-config = { package = "kopuz-config", version = "0.68.0", path = "./shared/config" }
-db = { package = "kopuz-db", version = "0.68.0", path = "./daemon/db" }
-api = { package = "kopuz-api", version = "0.68.0", path = "./shared/api" }
-proto = { package = "kopuz-proto", version = "0.68.0", path = "./shared/proto" }
-daemon = { package = "kopuz-daemon", version = "0.68.0", path = "./daemon/core" }
-kopuzd = { package = "kopuz-kopuzd", version = "0.68.0", path = "./daemon/kopuzd" }
-client = { package = "kopuz-client", version = "0.68.0", path = "./apps/common/client" }
-kopuz-legacy = { version = "0.68.0", path = "./apps/legacy/kopuz" }
-server = { package = "kopuz-server", version = "0.68.0", path = "./daemon/server" }
-kopuz_route = { package = "kopuz-route", version = "0.68.0", path = "./apps/legacy/kopuz_route" }
-discord-presence = { package = "kopuz-discord-presence", version = "0.68.0", path = "./daemon/discord-presence" }
-scrobble = { package = "kopuz-scrobble", version = "0.68.0", path = "./daemon/scrobble" }
-radio = { package = "kopuz-radio", version = "0.68.0", path = "./daemon/radio" }
+i18n = { package = "kopuz-i18n", version = "1.0.1", path = "./apps/common/i18n" }
+player = { package = "kopuz-player", version = "1.0.1", path = "./daemon/player" }
+reader = { package = "kopuz-reader", version = "1.0.1", path = "./daemon/reader" }
+components = { package = "kopuz-components", version = "1.0.1", path = "./apps/legacy/components" }
+hooks = { package = "kopuz-hooks", version = "1.0.1", path = "./apps/legacy/hooks" }
+pages = { package = "kopuz-pages", version = "1.0.1", path = "./apps/legacy/pages" }
+utils = { package = "kopuz-utils", version = "1.0.1", path = "./shared/utils" }
+config = { package = "kopuz-config", version = "1.0.1", path = "./shared/config" }
+db = { package = "kopuz-db", version = "1.0.1", path = "./daemon/db" }
+api = { package = "kopuz-api", version = "1.0.1", path = "./shared/api" }
+proto = { package = "kopuz-proto", version = "1.0.1", path = "./shared/proto" }
+daemon = { package = "kopuz-daemon", version = "1.0.1", path = "./daemon/core" }
+kopuzd = { package = "kopuz-kopuzd", version = "1.0.1", path = "./daemon/kopuzd" }
+client = { package = "kopuz-client", version = "1.0.1", path = "./apps/common/client" }
+kopuz-legacy = { version = "1.0.1", path = "./apps/legacy/kopuz" }
+server = { package = "kopuz-server", version = "1.0.1", path = "./daemon/server" }
+kopuz_route = { package = "kopuz-route", version = "1.0.1", path = "./apps/legacy/kopuz_route" }
+discord-presence = { package = "kopuz-discord-presence", version = "1.0.1", path = "./daemon/discord-presence" }
+scrobble = { package = "kopuz-scrobble", version = "1.0.1", path = "./daemon/scrobble" }
+radio = { package = "kopuz-radio", version = "1.0.1", path = "./daemon/radio" }
+plugin-host = { package = "kopuz-plugin-host", version = "1.0.1", path = "./daemon/plugin-host" }
+bundled-plugins = { package = "kopuz-bundled-plugins", version = "1.0.1", path = "./daemon/bundled-plugins" }
 
 # GPUI frontend; its own `components` is a path dependency, as the key above is Dioxus's.
 gpui-kit = "0.6.4"
@@ -182,6 +206,13 @@ panic = "unwind"
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# The official plugins, built for wasm32-wasip2 by daemon/bundled-plugins.
+# Small beats fast here: they spend their time waiting on the network.
+[profile.plugin]
+inherits = "release"
+opt-level = "s"
+panic = "abort"
 
 [profile.server-dev]
 inherits = "dev"

@@ -24,10 +24,13 @@ pub use ui_prefs::UiPrefs;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum FetchStrategy {
     #[default]
-    MusicBrainzFirst,
-    LastFmFirst,
+    // Keep existing settings files readable after retiring the other providers.
+    #[serde(
+        alias = "MusicBrainzFirst",
+        alias = "LastFmFirst",
+        alias = "LastFmOnly"
+    )]
     MusicBrainzOnly,
-    LastFmOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -877,6 +880,14 @@ pub struct Playback {
     #[serde(default)]
     #[garde(skip)]
     pub sample_rate_mode: SampleRateMode,
+    /// A cpal device id (`host:device`, e.g. `alsa:hw:CARD=0,DEV=0`); `None` follows the system default.
+    #[serde(default)]
+    #[garde(skip)]
+    pub output_device: Option<String>,
+    /// Hold `output_device` alone, at each track's rate; only ALSA hardware devices can.
+    #[serde(default)]
+    #[garde(skip)]
+    pub exclusive_output: bool,
     #[serde(default)]
     #[garde(skip)]
     pub stream_quality: StreamQuality,
@@ -903,6 +914,8 @@ impl Default for Playback {
             replay_gain: ReplayGainSettings::default(),
             device_change_behavior: DeviceChangeBehavior::Pause,
             sample_rate_mode: SampleRateMode::System,
+            output_device: None,
+            exclusive_output: false,
             stream_quality: StreamQuality::High,
             autoplay_radio: false,
             skip_explicit: false,
@@ -1019,6 +1032,10 @@ pub struct Lyrics {
     #[serde(default)]
     #[garde(skip)]
     pub enable_musixmatch_lyrics: bool,
+    /// Have the daemon add a Latin reading to lyric lines written in another script.
+    #[serde(default)]
+    #[garde(skip)]
+    pub romanize_lyrics: bool,
     /// Milliseconds to hold the lyrics behind the playback clock.
     #[serde(default, deserialize_with = "deserialize_lyrics_offset_ms")]
     #[garde(range(min = -LYRICS_OFFSET_LIMIT_MS, max = LYRICS_OFFSET_LIMIT_MS))]
@@ -1042,6 +1059,7 @@ impl Default for Lyrics {
         Self {
             prefer_local_lyrics: false,
             enable_musixmatch_lyrics: false,
+            romanize_lyrics: false,
             lyrics_offset_ms: 0,
             lyrics_offset_auto: true,
             lyrics_depth_blur: true,
@@ -1125,6 +1143,10 @@ pub struct Integrations {
     #[serde(default = "default_discord_presence_upload_cover")]
     #[garde(skip)]
     pub discord_presence_upload_cover: Option<bool>,
+    /// Offer a "Listen on Kopuz" button on the Discord card, for songs whose source other people can play too.
+    #[serde(default = "default_discord_presence_listen_button")]
+    #[garde(skip)]
+    pub discord_presence_listen_button: Option<bool>,
     #[serde(default = "default_radio_registries")]
     #[garde(skip)]
     pub radio_registries: Vec<RegistryEntry>,
@@ -1136,6 +1158,7 @@ impl Default for Integrations {
             discord_presence: Some(true),
             discord_presence_source: Some(true),
             discord_presence_upload_cover: Some(false),
+            discord_presence_listen_button: Some(true),
             radio_registries: default_radio_registries(),
         }
     }
@@ -1209,6 +1232,10 @@ pub struct System {
     #[serde(default = "default_connectivity_check_urls")]
     #[garde(inner(custom(http_url)))]
     pub connectivity_check_urls: Vec<String>,
+    /// Desktop-only: an `<ip>:<port>` the app's daemon also serves the API on, for `kopuzctl --address` and other clients; empty serves the local socket alone. Read at startup, so a change needs a restart.
+    #[serde(default)]
+    #[garde(custom(valid_listen_address))]
+    pub listen_address: String,
 }
 
 impl Default for System {
@@ -1218,7 +1245,28 @@ impl Default for System {
             auto_check_updates: default_auto_check_updates(),
             minimize_to_tray: false,
             connectivity_check_urls: default_connectivity_check_urls(),
+            listen_address: String::new(),
         }
+    }
+}
+
+impl System {
+    /// The TCP address to serve on, if one is set and parses.
+    pub fn listen_socket_address(&self) -> Option<std::net::SocketAddr> {
+        let address = self.listen_address.trim();
+        if address.is_empty() {
+            return None;
+        }
+        address.parse().ok()
+    }
+}
+
+fn valid_listen_address(value: &str, _: &()) -> garde::Result {
+    let value = value.trim();
+    if value.is_empty() || value.parse::<std::net::SocketAddr>().is_ok() {
+        Ok(())
+    } else {
+        Err(garde::Error::new("not an <ip>:<port> address"))
     }
 }
 
@@ -1263,6 +1311,10 @@ fn default_discord_presence() -> Option<bool> {
 }
 
 fn default_discord_presence_source() -> Option<bool> {
+    Some(true)
+}
+
+fn default_discord_presence_listen_button() -> Option<bool> {
     Some(true)
 }
 
@@ -1348,6 +1400,28 @@ mod tests {
         EqualizerSettings, ReplayGainInfo, ReplayGainMode, ReplayGainSettings, Settings,
         SettingsLayout, loudness_gain,
     };
+
+    #[test]
+    fn retired_cover_strategies_keep_existing_settings_readable() {
+        for strategy in [
+            "MusicBrainzFirst",
+            "LastFmFirst",
+            "LastFmOnly",
+            "MusicBrainzOnly",
+        ] {
+            let settings: Settings = toml::from_str(&format!(
+                "theme = \"light\"\ncover_fetch_strategy = \"{strategy}\""
+            ))
+            .expect("existing settings still load");
+            assert_eq!(settings.ui.theme, "light");
+            assert_eq!(
+                settings.library.cover_fetch_strategy,
+                super::FetchStrategy::MusicBrainzOnly
+            );
+            let saved = toml::to_string(&settings).expect("serialize");
+            assert!(saved.contains("cover_fetch_strategy = \"MusicBrainzOnly\""));
+        }
+    }
 
     fn tagged() -> ReplayGainInfo {
         ReplayGainInfo {

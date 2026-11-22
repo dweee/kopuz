@@ -17,6 +17,7 @@ mod library;
 mod mutations;
 mod player;
 mod playlists;
+mod plugins;
 mod prefs;
 mod queue;
 mod radio;
@@ -48,13 +49,15 @@ pub use library::{
 };
 pub use mutations::{ArtworkChange, ArtworkUpload, TrackMetadataPatch};
 pub use player::{
-    BufferedRange, ExternalDevice, ExternalPlayback, FadingState, Intent, LoopMode, Phase,
-    PlayerCommand, PlayerState, PositionAnchor, QueueSummary, TrackKind, VideoChunk, VideoRequest,
+    BufferedRange, ExternalDevice, ExternalPlayback, FadingState, Intent, LoopMode, OutputDevice,
+    Phase, PlayerCommand, PlayerState, PositionAnchor, QueueSummary, TrackKind, VideoChunk,
+    VideoRequest,
 };
 pub use playlists::{
     PlaylistCatalog, PlaylistEdit, PlaylistFolderInfo, PlaylistImport, PlaylistInfo,
     PlaylistPrivacy, PlaylistReorder,
 };
+pub use plugins::{PluginCatalog, PluginInfo, PluginOrigin, PluginUpdate};
 pub use prefs::{
     FrontendPref, MAX_PREF_ENTRIES_PER_CALL, MAX_PREF_FRONTEND_BYTES, MAX_PREF_KEY_BYTES,
     MAX_PREF_TOTAL_BYTES, MAX_PREF_VALUE_BYTES, PrefEntry,
@@ -194,9 +197,15 @@ pub trait PlayerApi: Send + Sync {
         device_id: Option<String>,
     ) -> Result<(), ApiError>;
 
+    /// The audio outputs the daemon's player can be pointed at with `Playback::output_device`.
+    async fn output_devices(&self) -> Result<Vec<OutputDevice>, ApiError>;
+
     /// A byte range of a queued music video's picture for a muted element, which follows
     /// [`PlayerState::position`] less `output_latency_ms` one to one.
     async fn video(&self, request: VideoRequest) -> Result<VideoChunk, ApiError>;
+
+    /// Play what a "Listen on Kopuz" link carries, on its own source; the outcome is also a notice, for the window that is open.
+    async fn open_listen_link(&self, link: String) -> Result<(), ApiError>;
 }
 
 /// Reading the library, and the per-track state that belongs to it.
@@ -688,6 +697,29 @@ pub trait PrefsApi: Send + Sync {
     ) -> Result<(), ApiError>;
 }
 
+/// The plugins the daemon runs, and the community marketplace.
+#[async_trait::async_trait]
+pub trait PluginApi: Send + Sync {
+    /// Installed plugins and what the marketplace offers. A marketplace that
+    /// cannot be reached leaves the installed ones listed and says why.
+    async fn plugins(&self) -> Result<PluginCatalog, ApiError>;
+
+    /// Install a community plugin, or update an installed one, while sources
+    /// keep running: the marketplace's version, or the update waiting in the
+    /// plugin directory. `network` is the hosts the user was shown; a plugin
+    /// reaching any other set is refused. Calls already running finish on the
+    /// old version and its sources keep their rows and credentials.
+    async fn install_plugin(
+        &self,
+        id: String,
+        network: Vec<String>,
+    ) -> Result<PluginInfo, ApiError>;
+
+    /// Remove an installed community plugin. Sources of its services stay,
+    /// reading what they cached, until it is installed again.
+    async fn uninstall_plugin(&self, id: String) -> Result<(), ApiError>;
+}
+
 /// Subscribe to the state stream. Every subscriber gets every event from the
 /// moment of subscription; a snapshot fetch plus this stream is the complete
 /// synchronization story.
@@ -709,6 +741,7 @@ pub trait KopuzApi:
     + SourceApi
     + ConfigApi
     + PrefsApi
+    + PluginApi
     + EventApi
     + Send
     + Sync
@@ -724,6 +757,7 @@ impl<T> KopuzApi for T where
         + SourceApi
         + ConfigApi
         + PrefsApi
+        + PluginApi
         + EventApi
         + Send
         + Sync
@@ -736,7 +770,7 @@ impl<T> KopuzApi for T where
 pub mod prelude {
     pub use super::{
         ArtworkApi, ConfigApi, EventApi, JobApi, KopuzApi, LibraryApi, PlayerApi, PlaylistApi,
-        PrefsApi, SourceApi,
+        PluginApi, PrefsApi, SourceApi,
     };
 }
 

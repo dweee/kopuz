@@ -24,6 +24,7 @@ pub struct LocalApi {
     pub(super) downloader: Option<Arc<crate::url_download::UrlDownloadService>>,
     pub(super) spotify: Option<Arc<crate::spotify::SpotifySink>>,
     pub(super) video: Option<Arc<crate::video::VideoService>>,
+    pub(super) plugins: Arc<crate::plugins::PluginService>,
 }
 
 impl LocalApi {
@@ -74,6 +75,7 @@ impl LocalApi {
             downloader: None,
             spotify: None,
             video: None,
+            plugins: Arc::new(crate::plugins::PluginService::default()),
         }
     }
 
@@ -436,12 +438,45 @@ impl api::PlayerApi for LocalApi {
             .await
     }
 
+    async fn output_devices(&self) -> Result<Vec<api::OutputDevice>, ApiError> {
+        // Enumeration probes sound cards, so it stays off the async workers.
+        let devices = tokio::task::spawn_blocking(player::output_devices)
+            .await
+            .map_err(|error| ApiError::internal(format!("listing output devices: {error}")))?;
+        Ok(devices
+            .into_iter()
+            .map(|device| api::OutputDevice {
+                id: device.id,
+                name: device.name,
+                is_default: device.is_default,
+                exclusive: device.exclusive,
+            })
+            .collect())
+    }
+
     async fn video(&self, request: api::VideoRequest) -> Result<api::VideoChunk, ApiError> {
         self.video
             .as_deref()
             .ok_or_else(|| ApiError::unsupported("this daemon runs without music videos"))?
             .chunk(request)
             .await
+    }
+
+    async fn open_listen_link(&self, link: String) -> Result<(), ApiError> {
+        self.acted();
+        let played =
+            crate::listen_link::play(&link, self.sources()?, self.catalog()?, &self.session).await;
+        let (level, code) = match &played {
+            Ok(()) => (api::NoticeLevel::Info, "listen_link_playing"),
+            Err(refusal) => (api::NoticeLevel::Error, refusal.notice),
+        };
+        // The window that is open may not be the process that was handed the link.
+        self.session.emit_event(api::ApiEvent::Notice {
+            level,
+            code: code.to_string(),
+            message: None,
+        });
+        played.map_err(|refusal| refusal.error)
     }
 }
 
@@ -787,6 +822,48 @@ impl api::PrefsApi for LocalApi {
         entries: Vec<api::PrefEntry>,
     ) -> Result<(), ApiError> {
         self.prefs()?.set(&frontend, entries).await
+    }
+}
+
+#[async_trait::async_trait]
+impl api::PluginApi for LocalApi {
+    async fn plugins(&self) -> Result<api::PluginCatalog, ApiError> {
+        Ok(self.plugins.catalog().await)
+    }
+
+    async fn install_plugin(
+        &self,
+        id: String,
+        network: Vec<String>,
+    ) -> Result<api::PluginInfo, ApiError> {
+        let info = self.plugins.install(&id, &network).await?;
+        self.plugins_changed().await;
+        Ok(info)
+    }
+
+    async fn uninstall_plugin(&self, id: String) -> Result<(), ApiError> {
+        self.plugins.uninstall(&id).await?;
+        self.plugins_changed().await;
+        Ok(())
+    }
+}
+
+impl LocalApi {
+    /// The services offered changed, and the active source may be one a
+    /// plugin serves, so rebuild it on the plugin now loaded.
+    async fn plugins_changed(&self) {
+        if let Some(sources) = &self.sources {
+            sources.plugins_changed().await;
+        }
+        self.session.invalidate(api::Table::Servers);
+        self.session.invalidate(api::Table::Plugins);
+    }
+
+    /// Swap in plugins dropped into the plugin directory while the daemon runs.
+    pub fn watch_plugins(self: &Arc<Self>) {
+        crate::plugins::watch(Arc::downgrade(self), |api: Arc<Self>| async move {
+            api.plugins_changed().await;
+        });
     }
 }
 

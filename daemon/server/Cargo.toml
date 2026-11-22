@@ -29,6 +29,7 @@ uuid = { workspace = true }
 md5 = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
+thiserror = { workspace = true }
 base64 = { workspace = true }
 httpdate = { workspace = true }
 hex = { workspace = true }
@@ -40,6 +41,9 @@ reader = { workspace = true }
 db = { workspace = true }
 utils = { workspace = true, features = ["http"] }
 async-trait = { workspace = true }
+arc-swap = { workspace = true }
+bundled-plugins = { workspace = true }
+plugin-host = { workspace = true }
 quick-xml = { workspace = true }
 lofty = { workspace = true }
 urlencoding = "2.1"
@@ -49,6 +53,13 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 symphonia = { workspace = true }
 smb2 = "0.27.2"
 libloading = { workspace = true }
+wana_kana = { workspace = true }
+vibrato = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+pinyin = { workspace = true }
+any_ascii = { workspace = true }
+unicode-script = { workspace = true }
 
 [build-dependencies]
 cc = "1"

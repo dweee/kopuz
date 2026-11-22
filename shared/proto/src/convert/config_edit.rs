@@ -23,6 +23,8 @@ pub fn setting_key_to_proto(value: config::SettingKey) -> SettingKey {
             PlaybackKey::ReplayGain => SettingKey::ReplayGain,
             PlaybackKey::DeviceChangeBehavior => SettingKey::DeviceChangeBehavior,
             PlaybackKey::SampleRateMode => SettingKey::SampleRateMode,
+            PlaybackKey::OutputDevice => SettingKey::OutputDevice,
+            PlaybackKey::ExclusiveOutput => SettingKey::ExclusiveOutput,
             PlaybackKey::StreamQuality => SettingKey::StreamQuality,
             PlaybackKey::AutoplayRadio => SettingKey::AutoplayRadio,
             PlaybackKey::SkipExplicit => SettingKey::SkipExplicit,
@@ -52,6 +54,7 @@ pub fn setting_key_to_proto(value: config::SettingKey) -> SettingKey {
         K::Lyrics(key) => match key {
             LyricsKey::PreferLocalLyrics => SettingKey::PreferLocalLyrics,
             LyricsKey::EnableMusixmatchLyrics => SettingKey::EnableMusixmatchLyrics,
+            LyricsKey::RomanizeLyrics => SettingKey::RomanizeLyrics,
             LyricsKey::LyricsOffsetMs => SettingKey::LyricsOffsetMs,
             LyricsKey::LyricsOffsetAuto => SettingKey::LyricsOffsetAuto,
             LyricsKey::LyricsDepthBlur => SettingKey::LyricsDepthBlur,
@@ -70,6 +73,7 @@ pub fn setting_key_to_proto(value: config::SettingKey) -> SettingKey {
             IntegrationsKey::DiscordPresence => SettingKey::DiscordPresence,
             IntegrationsKey::DiscordPresenceSource => SettingKey::DiscordPresenceSource,
             IntegrationsKey::DiscordPresenceUploadCover => SettingKey::DiscordPresenceUploadCover,
+            IntegrationsKey::DiscordPresenceListenButton => SettingKey::DiscordPresenceListenButton,
             IntegrationsKey::RadioRegistries => SettingKey::RadioRegistries,
         },
         K::Downloads(key) => match key {
@@ -85,6 +89,7 @@ pub fn setting_key_to_proto(value: config::SettingKey) -> SettingKey {
             SystemKey::AutoCheckUpdates => SettingKey::AutoCheckUpdates,
             SystemKey::MinimizeToTray => SettingKey::MinimizeToTray,
             SystemKey::ConnectivityCheckUrls => SettingKey::ConnectivityCheckUrls,
+            SystemKey::ListenAddress => SettingKey::ListenAddress,
         },
     }
 }
@@ -102,6 +107,8 @@ pub fn setting_key_from_proto(value: i32) -> Option<config::SettingKey> {
         SettingKey::ReplayGain => K::Playback(PlaybackKey::ReplayGain),
         SettingKey::DeviceChangeBehavior => K::Playback(PlaybackKey::DeviceChangeBehavior),
         SettingKey::SampleRateMode => K::Playback(PlaybackKey::SampleRateMode),
+        SettingKey::OutputDevice => K::Playback(PlaybackKey::OutputDevice),
+        SettingKey::ExclusiveOutput => K::Playback(PlaybackKey::ExclusiveOutput),
         SettingKey::StreamQuality => K::Playback(PlaybackKey::StreamQuality),
         SettingKey::AutoplayRadio => K::Playback(PlaybackKey::AutoplayRadio),
         SettingKey::SkipExplicit => K::Playback(PlaybackKey::SkipExplicit),
@@ -125,6 +132,7 @@ pub fn setting_key_from_proto(value: i32) -> Option<config::SettingKey> {
         SettingKey::CustomBackgroundPath => K::Background(BackgroundKey::CustomBackgroundPath),
         SettingKey::PreferLocalLyrics => K::Lyrics(LyricsKey::PreferLocalLyrics),
         SettingKey::EnableMusixmatchLyrics => K::Lyrics(LyricsKey::EnableMusixmatchLyrics),
+        SettingKey::RomanizeLyrics => K::Lyrics(LyricsKey::RomanizeLyrics),
         SettingKey::LyricsOffsetMs => K::Lyrics(LyricsKey::LyricsOffsetMs),
         SettingKey::LyricsOffsetAuto => K::Lyrics(LyricsKey::LyricsOffsetAuto),
         SettingKey::LyricsDepthBlur => K::Lyrics(LyricsKey::LyricsDepthBlur),
@@ -140,6 +148,9 @@ pub fn setting_key_from_proto(value: i32) -> Option<config::SettingKey> {
         SettingKey::DiscordPresenceSource => {
             K::Integrations(IntegrationsKey::DiscordPresenceSource)
         }
+        SettingKey::DiscordPresenceListenButton => {
+            K::Integrations(IntegrationsKey::DiscordPresenceListenButton)
+        }
         SettingKey::DiscordPresenceUploadCover => {
             K::Integrations(IntegrationsKey::DiscordPresenceUploadCover)
         }
@@ -152,6 +163,7 @@ pub fn setting_key_from_proto(value: i32) -> Option<config::SettingKey> {
         SettingKey::AutoCheckUpdates => K::System(SystemKey::AutoCheckUpdates),
         SettingKey::MinimizeToTray => K::System(SystemKey::MinimizeToTray),
         SettingKey::ConnectivityCheckUrls => K::System(SystemKey::ConnectivityCheckUrls),
+        SettingKey::ListenAddress => K::System(SystemKey::ListenAddress),
     })
 }
 
@@ -170,6 +182,8 @@ pub fn config_edit_to_proto(value: &config::SettingsEdit) -> ConfigEdit {
             Pb::SampleRateMode(value) => {
                 Edit::SampleRateMode(sample_rate_mode_to_proto(value) as i32)
             }
+            Pb::OutputDevice(value) => Edit::OutputDevice(OptionalString { value }),
+            Pb::ExclusiveOutput(value) => Edit::ExclusiveOutput(value),
             Pb::StreamQuality(value) => Edit::StreamQuality(stream_quality_to_proto(value) as i32),
             Pb::AutoplayRadio(value) => Edit::AutoplayRadio(value),
             Pb::SkipExplicit(value) => Edit::SkipExplicit(value),
@@ -213,6 +227,7 @@ pub fn config_edit_to_proto(value: &config::SettingsEdit) -> ConfigEdit {
         Se::Lyrics(edit) => match edit {
             Ly::PreferLocalLyrics(value) => Edit::PreferLocalLyrics(value),
             Ly::EnableMusixmatchLyrics(value) => Edit::EnableMusixmatchLyrics(value),
+            Ly::RomanizeLyrics(value) => Edit::RomanizeLyrics(value),
             Ly::LyricsOffsetMs(value) => Edit::LyricsOffsetMs(value),
             Ly::LyricsOffsetAuto(value) => Edit::LyricsOffsetAuto(value),
             Ly::LyricsDepthBlur(value) => Edit::LyricsDepthBlur(value),
@@ -236,6 +251,9 @@ pub fn config_edit_to_proto(value: &config::SettingsEdit) -> ConfigEdit {
         Se::Integrations(edit) => match edit {
             In::DiscordPresence(value) => Edit::DiscordPresence(OptionalBool { value }),
             In::DiscordPresenceSource(value) => Edit::DiscordPresenceSource(OptionalBool { value }),
+            In::DiscordPresenceListenButton(value) => {
+                Edit::DiscordPresenceListenButton(OptionalBool { value })
+            }
             In::DiscordPresenceUploadCover(value) => {
                 Edit::DiscordPresenceUploadCover(OptionalBool { value })
             }
@@ -265,6 +283,7 @@ pub fn config_edit_to_proto(value: &config::SettingsEdit) -> ConfigEdit {
             Sy::AutoCheckUpdates(value) => Edit::AutoCheckUpdates(value),
             Sy::MinimizeToTray(value) => Edit::MinimizeToTray(value),
             Sy::ConnectivityCheckUrls(values) => Edit::ConnectivityCheckUrls(StringList { values }),
+            Sy::ListenAddress(value) => Edit::ListenAddress(value),
         },
     };
     ConfigEdit { edit: Some(edit) }
@@ -295,6 +314,8 @@ pub fn config_edit_from_proto(value: &ConfigEdit) -> Option<config::SettingsEdit
         Edit::SampleRateMode(value) => {
             Se::Playback(Pb::SampleRateMode(sample_rate_mode_from_proto(value)))
         }
+        Edit::OutputDevice(value) => Se::Playback(Pb::OutputDevice(value.value)),
+        Edit::ExclusiveOutput(value) => Se::Playback(Pb::ExclusiveOutput(value)),
         Edit::StreamQuality(value) => {
             Se::Playback(Pb::StreamQuality(stream_quality_from_proto(value)))
         }
@@ -330,6 +351,7 @@ pub fn config_edit_from_proto(value: &ConfigEdit) -> Option<config::SettingsEdit
         Edit::CustomBackgroundPath(value) => Se::Background(Bg::CustomBackgroundPath(value)),
         Edit::PreferLocalLyrics(value) => Se::Lyrics(Ly::PreferLocalLyrics(value)),
         Edit::EnableMusixmatchLyrics(value) => Se::Lyrics(Ly::EnableMusixmatchLyrics(value)),
+        Edit::RomanizeLyrics(value) => Se::Lyrics(Ly::RomanizeLyrics(value)),
         Edit::LyricsOffsetMs(value) => Se::Lyrics(Ly::LyricsOffsetMs(value)),
         Edit::LyricsOffsetAuto(value) => Se::Lyrics(Ly::LyricsOffsetAuto(value)),
         Edit::LyricsDepthBlur(value) => Se::Lyrics(Ly::LyricsDepthBlur(value)),
@@ -357,6 +379,9 @@ pub fn config_edit_from_proto(value: &ConfigEdit) -> Option<config::SettingsEdit
         Edit::DiscordPresenceSource(value) => {
             Se::Integrations(In::DiscordPresenceSource(value.value))
         }
+        Edit::DiscordPresenceListenButton(value) => {
+            Se::Integrations(In::DiscordPresenceListenButton(value.value))
+        }
         Edit::DiscordPresenceUploadCover(value) => {
             Se::Integrations(In::DiscordPresenceUploadCover(value.value))
         }
@@ -374,6 +399,7 @@ pub fn config_edit_from_proto(value: &ConfigEdit) -> Option<config::SettingsEdit
         Edit::AutoCheckUpdates(value) => Se::System(Sy::AutoCheckUpdates(value)),
         Edit::MinimizeToTray(value) => Se::System(Sy::MinimizeToTray(value)),
         Edit::ConnectivityCheckUrls(list) => Se::System(Sy::ConnectivityCheckUrls(list.values)),
+        Edit::ListenAddress(value) => Se::System(Sy::ListenAddress(value)),
     })
 }
 

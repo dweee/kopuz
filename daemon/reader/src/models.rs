@@ -135,6 +135,9 @@ pub struct Track {
     pub khz: u32,
     #[serde(default)]
     pub bitrate: u16,
+    /// Bits per sample of a lossless stream; 0 for lossy audio or when the source does not say.
+    #[serde(default)]
+    pub bit_depth: u8,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     #[serde(default)]
@@ -250,6 +253,7 @@ impl Track {
             .map_or(self.duration, |ms| ms.div_ceil(1000));
         other.khz = 0;
         other.bitrate = 0;
+        other.bit_depth = 0;
         other.playlist_item_id = None;
         other.replay_gain = config::ReplayGainInfo::default();
         other.counterpart = Some(Box::new(counterpart.mirrored(item_id.clone(), own_ms)));
@@ -324,8 +328,15 @@ impl CoverRef {
             "custom" if !item_id.is_empty() => {
                 Self::remote_item(MusicService::Custom, item_id, value)
             }
-            "ytmusic" | "soundcloud" | "applemusic" | "qobuz" | "nextcloud" | "clippsly"
-            | "smb" => value.map_or(Self::None, Self::parse),
+            // YT Music, SoundCloud and Apple Music refs only carry
+            // self-contained artwork — a URL, or an Apple artwork template.
+            // Their item identity is irrelevant to cover resolution.
+            // Nextcloud too: an img tag won't send the Basic auth its previews
+            // need, so the sync caches art to disk and the ref carries a path.
+            // A plugin's covers are self-contained too: it cannot rely on the
+            // host knowing how to sign a URL for a service the host never saw.
+            "ytmusic" | "soundcloud" | "applemusic" | "qobuz" | "nextcloud" | "clippsly" | "smb"
+            | "plugin" => value.map_or(Self::None, Self::parse),
             _ => Self::None,
         }
     }
@@ -360,6 +371,7 @@ impl CoverRef {
             | MusicService::Clippsly
             | MusicService::Smb
             | MusicService::AudioCd => cover.map_or(Self::None, Self::parse),
+            MusicService::Plugin => cover.map_or(Self::None, Self::parse),
         }
     }
 
@@ -415,6 +427,7 @@ impl CoverRef {
             | MusicService::Clippsly
             | MusicService::Smb
             | MusicService::AudioCd => track.cover.as_deref().map_or(Self::None, Self::parse),
+            MusicService::Plugin => track.cover.as_deref().map_or(Self::None, Self::parse),
         }
     }
 
@@ -678,6 +691,7 @@ mod tests {
             duration: 0,
             khz: 0,
             bitrate: 0,
+            bit_depth: 0,
             track_number: None,
             disc_number: None,
             musicbrainz_release_id: None,
@@ -954,6 +968,7 @@ mod counterpart_tests {
             duration: 226,
             khz: 48,
             bitrate: 128,
+            bit_depth: 0,
             track_number: Some(1),
             disc_number: None,
             musicbrainz_release_id: None,

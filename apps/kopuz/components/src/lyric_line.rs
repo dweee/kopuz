@@ -27,15 +27,18 @@ const LINE_WIDTH: f32 = 20.;
 const TURN_WIDTH: f32 = 18.;
 // `leading-snug` on the small print of a background line.
 const SNUG: f32 = 1.375;
-// GPUI filters no text, so a blur is sampled: the words again around one ring, each copy faint.
+// A romanized reading sits under its line, quieter than the words it reads.
+const READING_ALPHA: f32 = 0.7;
+// GPUI filters no text, so a blur is sampled: the words again around two rings, each copy faint.
 const BLUR_TAPS: usize = 6;
 // Weights of the ink kept at the centre and given to each tap; together under one, so a blurred line reads lighter.
-const BLUR_CENTRE: f32 = 0.35;
-const BLUR_TAP: f32 = 0.05;
+const BLUR_CENTRE: f32 = 0.30;
+const BLUR_INNER_TAP: f32 = 0.035;
+const BLUR_TAP: f32 = 0.025;
 // Wider than this the copies part into ghost lines instead of a blur.
-const BLUR_RING_MAX: Pixels = px(8.);
+const BLUR_RING_MAX: Pixels = px(16.);
 /// How much of a sharp line's ink a blurred one shows, whatever its radius.
-pub const BLURRED_INK: f32 = BLUR_CENTRE + BLUR_TAPS as f32 * BLUR_TAP;
+pub const BLURRED_INK: f32 = BLUR_CENTRE + BLUR_TAPS as f32 * (BLUR_INNER_TAP + BLUR_TAP);
 
 type Seek = Rc<dyn Fn(u64, &mut Window, &mut App)>;
 
@@ -54,6 +57,7 @@ pub struct LyricLine {
     index: usize,
     start_ms: u64,
     text: SharedString,
+    reading: Option<SharedString>,
     body: Body,
     lit: bool,
     background: bool,
@@ -72,6 +76,7 @@ impl LyricLine {
             index,
             start_ms,
             text: text.into(),
+            reading: None,
             body: Body::Words,
             lit: false,
             background: false,
@@ -84,9 +89,15 @@ impl LyricLine {
         }
     }
 
-    /// The colour the voice leaves behind; the dim and the lit states are derived from it.
+    /// The colour of the line being sung; the others take the theme's text colour.
     pub fn ink(mut self, ink: Hsla) -> Self {
         self.ink = ink;
+        self
+    }
+
+    /// A Latin reading of the words, drawn smaller and dimmer under them.
+    pub fn reading(mut self, reading: Option<SharedString>) -> Self {
+        self.reading = reading;
         self
     }
 
@@ -149,17 +160,19 @@ impl RenderOnce for LyricLine {
         let (lit, background, opposite, paired) =
             (self.lit, self.background, self.opposite, self.paired);
         let sung = self.ink;
+        // The accent can sit close to the backdrop (gruvbox's does), so the lines it is not on wear the text colour.
+        let rest = cx.theme().foreground;
         let tint = if background { BACKGROUND_ALPHA } else { 1.0 };
         let base = if lit {
             sung.alpha(tint)
         } else if background {
-            sung.alpha(BACKGROUND_DIM)
+            rest.alpha(BACKGROUND_DIM)
         } else {
-            sung.alpha(DIM)
+            rest.alpha(DIM)
         };
         let turned = opposite || paired;
         let (start_ms, seek) = (self.start_ms, self.seek);
-        let hover = sung.alpha(DIM_HOVER * tint);
+        let hover = rest.alpha(DIM_HOVER * tint);
         let blur = Some(self.blur).filter(|radius| !lit && *radius > px(0.));
         let group = SharedString::from(format!("lyric-{}", self.index));
 
@@ -191,6 +204,21 @@ impl RenderOnce for LyricLine {
                 }
             });
 
+        let reading = self.reading.map(|reading| {
+            let ink = base.alpha(base.a * READING_ALPHA);
+            let line = div()
+                .text_sm()
+                .font_medium()
+                .line_height(relative(SNUG))
+                .text_color(ink);
+            match blur {
+                Some(radius) => line
+                    .child(blurred(reading, ink, hover, radius, group.clone()))
+                    .into_any_element(),
+                None => line.child(reading).into_any_element(),
+            }
+        });
+
         match self.body {
             Body::Interlude(progress) => body
                 .flex()
@@ -221,12 +249,14 @@ impl RenderOnce for LyricLine {
                     sung.alpha(UNSUNG * tint),
                     fills,
                 ))
+                .children(reading)
                 .into_any_element(),
             Body::Karaoke(_) | Body::Words => match blur {
                 Some(radius) => body
                     .child(blurred(self.text, base, hover, radius, group))
+                    .children(reading)
                     .into_any_element(),
-                None => body.child(self.text).into_any_element(),
+                None => body.child(self.text).children(reading).into_any_element(),
             },
         }
     }
@@ -240,11 +270,16 @@ fn blurred(
     radius: Pixels,
     group: SharedString,
 ) -> impl IntoElement {
-    let ring = ink.alpha(ink.a * BLUR_TAP);
     let radius = radius.min(BLUR_RING_MAX);
-    let copies = (0..BLUR_TAPS).map(move |tap| {
-        let angle = std::f32::consts::TAU * tap as f32 / BLUR_TAPS as f32;
-        (radius * angle.cos(), radius * angle.sin())
+    let rings = [
+        (radius / 2., ink.alpha(ink.a * BLUR_INNER_TAP), 0.5),
+        (radius, ink.alpha(ink.a * BLUR_TAP), 0.),
+    ];
+    let copies = rings.into_iter().flat_map(move |(reach, ring, turn)| {
+        (0..BLUR_TAPS).map(move |tap| {
+            let angle = std::f32::consts::TAU * (tap as f32 + turn) / BLUR_TAPS as f32;
+            (reach * angle.cos(), reach * angle.sin(), ring)
+        })
     });
     div()
         .relative()
@@ -255,7 +290,7 @@ fn blurred(
                 .group_hover(group.clone(), move |style| style.text_color(hover))
                 .child(text.clone()),
         )
-        .children(copies.map(move |(x, y)| {
+        .children(copies.map(move |(x, y, ring)| {
             div()
                 .absolute()
                 .top(y)

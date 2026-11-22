@@ -31,6 +31,33 @@ fn volume_scroll_step_edit(value: &str) -> Option<SettingsEdit> {
     )))
 }
 
+/// "System default" (the empty id) first, then every device; a chosen device that is unplugged still shows as itself.
+fn output_device_options(
+    devices: &[api::OutputDevice],
+    current: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut options = vec![(String::new(), i18n::t("output_device_system_default"))];
+    options.extend(
+        devices
+            .iter()
+            .map(|device| (device.id.clone(), device.name.clone())),
+    );
+    if let Some(current) = current
+        && !devices.iter().any(|device| device.id == current)
+    {
+        options.push((current.to_string(), current.to_string()));
+    }
+    options
+}
+
+/// Only a device the daemon can hold alone offers exclusive output; one left on stays so it can be turned off.
+fn offers_exclusive(devices: &[api::OutputDevice], playback: &config::Playback) -> bool {
+    playback.exclusive_output
+        || devices
+            .iter()
+            .any(|device| device.exclusive && Some(&device.id) == playback.output_device.as_ref())
+}
+
 #[component]
 pub(super) fn ConnectivitySection() -> Element {
     let changed = use_signal(|| 0u64);
@@ -407,6 +434,16 @@ pub(super) fn MetadataSection(settings: Signal<Settings>) -> Element {
                 }
             }
             SettingItem {
+                title: i18n::t("romanize_lyrics").to_string(),
+                config_key: "romanize_lyrics",
+                control: rsx! {
+                    ToggleSetting {
+                        enabled: settings.read().lyrics.romanize_lyrics,
+                        on_change: move |val| edits.edit(SettingsEdit::Lyrics(LyricsEdit::RomanizeLyrics(val))),
+                    }
+                }
+            }
+            SettingItem {
                 title: i18n::t("lyrics_offset_auto").to_string(),
                 config_key: "lyrics_offset_auto",
                 control: rsx! {
@@ -458,6 +495,13 @@ pub(super) fn PlayerSection(settings: Signal<Settings>) -> Element {
     let ctrl = use_context::<PlayerController>();
     let caps = hooks::sources::use_capabilities();
     let caps = caps.read().clone();
+    let output_devices = use_resource(|| async move {
+        hooks::consume_api()
+            .output_devices()
+            .await
+            .inspect_err(|error| tracing::warn!(%error, "listing output devices failed"))
+            .unwrap_or_default()
+    });
     let crossfade_label = if settings.read().playback.crossfade_seconds == 0 {
         i18n::t("crossfade_off")
     } else {
@@ -603,6 +647,40 @@ pub(super) fn PlayerSection(settings: Signal<Settings>) -> Element {
                         current: settings.read().playback.device_change_behavior,
                         on_change: move |behavior| {
                             edits.edit(SettingsEdit::Playback(PlaybackEdit::DeviceChangeBehavior(behavior)));
+                        }
+                    }
+                }
+            }
+            SettingItem {
+                title: i18n::t("output_device").to_string(),
+                config_key: "output_device",
+                control: rsx! {
+                    AppSelect {
+                        value: settings.read().playback.output_device.clone().unwrap_or_default(),
+                        options: output_device_options(
+                            &output_devices().unwrap_or_default(),
+                            settings.read().playback.output_device.as_deref(),
+                        ),
+                        on_change: move |id: String| {
+                            let device = (!id.is_empty()).then_some(id);
+                            edits.edit(SettingsEdit::Playback(PlaybackEdit::OutputDevice(device)));
+                        },
+                        class: "settings-select",
+                    }
+                }
+            }
+            if offers_exclusive(
+                &output_devices().unwrap_or_default(),
+                &settings.read().playback,
+            ) {
+                SettingItem {
+                    title: i18n::t("exclusive_output").to_string(),
+                    config_key: "exclusive_output",
+                    nested: true,
+                    control: rsx! {
+                        ToggleSetting {
+                            enabled: settings.read().playback.exclusive_output,
+                            on_change: move |on| edits.edit(SettingsEdit::Playback(PlaybackEdit::ExclusiveOutput(on))),
                         }
                     }
                 }
@@ -781,5 +859,195 @@ mod tests {
             ]
         );
         assert_eq!(offline_cache_size_options(5_000_000_000).len(), 6);
+    }
+}
+
+#[component]
+pub(super) fn PluginsSection() -> Element {
+    let changed = use_signal(|| 0u64);
+    let busy = use_signal(|| Option::<String>::None);
+    let catalog = hooks::plugins::use_plugins(changed);
+    let catalog = catalog().flatten().unwrap_or_default();
+    let unreachable = catalog.marketplace_error.map(|error| {
+        i18n::t_with(
+            "plugins_marketplace_unreachable",
+            &[("error", error.into())],
+        )
+    });
+    let (installed, available): (Vec<_>, Vec<_>) = catalog.plugins.into_iter().partition(on_disk);
+
+    rsx! {
+        SettingsSection { title: i18n::t("plugins").to_string(),
+            p { class: "px-5 py-2.5 text-sm text-white/60 text-pretty",
+                "{i18n::t(\"plugins_description\")}"
+            }
+            SettingsGroup { label: i18n::t("plugins_installed") }
+            for plugin in installed {
+                PluginRow { key: "{plugin.id}", plugin, busy, changed }
+            }
+            SettingsGroup { label: i18n::t("plugins_marketplace") }
+            if let Some(unreachable) = unreachable {
+                p { class: "px-5 py-2.5 text-sm text-amber-300/80 text-pretty", "{unreachable}" }
+            } else if available.is_empty() {
+                p { class: "px-5 py-2.5 text-sm text-white/50", "{i18n::t(\"plugins_marketplace_empty\")}" }
+            }
+            for plugin in available {
+                PluginRow { key: "{plugin.id}", plugin, busy, changed }
+            }
+        }
+    }
+}
+
+/// An update is only ever a build in the plugin directory or a newer listing
+/// of an installed plugin, so a plugin with one is on disk even when an
+/// update that waited across a restart left nothing of it loaded.
+fn on_disk(plugin: &api::PluginInfo) -> bool {
+    plugin.installed_version.is_some() || plugin.update.is_some()
+}
+
+#[component]
+fn PluginRow(
+    plugin: api::PluginInfo,
+    busy: Signal<Option<String>>,
+    changed: Signal<u64>,
+) -> Element {
+    let community = plugin.origin == api::PluginOrigin::Community;
+    let working = busy().is_some_and(|id| id == plugin.id);
+    let idle = busy().is_none();
+    let version = plugin
+        .installed_version
+        .clone()
+        .or_else(|| plugin.available_version.clone())
+        .unwrap_or_default();
+    let origin = if community {
+        i18n::t("plugin_community")
+    } else {
+        i18n::t("plugin_official")
+    };
+    let shown = |network: &[String]| -> String {
+        network
+            .iter()
+            .map(|host| match host.as_str() {
+                "$server" => i18n::t("plugin_your_server"),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let reaches = (!plugin.network.is_empty()).then(|| {
+        i18n::t_with(
+            "plugin_reaches",
+            &[("hosts", shown(&plugin.network).into())],
+        )
+    });
+    let update_reaches = plugin
+        .update
+        .as_ref()
+        .filter(|update| !update.added_hosts.is_empty())
+        .map(|update| {
+            i18n::t_with(
+                "plugin_update_reaches",
+                &[("hosts", shown(&update.added_hosts).into())],
+            )
+        });
+    let install_network = plugin.network.clone();
+    let update = plugin.update.clone();
+    // A package manager's plugin is its own to remove.
+    let removable = community && !plugin.system && on_disk(&plugin);
+    let byline = (!plugin.author.is_empty())
+        .then(|| i18n::t_with("plugin_by", &[("author", plugin.author.clone().into())]));
+    let install_id = plugin.id.clone();
+    let remove_id = plugin.id.clone();
+    let button = "app-button-tonal bg-white/10 hover:bg-white/20 text-white px-3 py-2 rounded-xl text-sm transition-colors disabled:opacity-50";
+
+    rsx! {
+        div { class: "settings-row flex items-start justify-between gap-5 px-5 py-3",
+            div { class: "min-w-0 flex flex-col gap-1",
+                div { class: "flex items-center gap-2 flex-wrap",
+                    p { class: "text-sm text-white/90 font-medium", "{plugin.name}" }
+                    span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-white/10 text-white/60", "{origin}" }
+                    if plugin.system {
+                        span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-white/10 text-white/60", "{i18n::t(\"plugin_system\")}" }
+                    }
+                    if !plugin.sandboxed {
+                        span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-white/10 text-white/60", "{i18n::t(\"plugin_native\")}" }
+                    }
+                    span { class: "text-xs text-white/40", "{version}" }
+                }
+                if let Some(byline) = byline {
+                    p { class: "text-xs text-white/50", "{byline}" }
+                }
+                if !plugin.description.is_empty() {
+                    p { class: "text-xs text-white/60 text-pretty", "{plugin.description}" }
+                }
+                if let Some(reaches) = reaches {
+                    p { class: "text-xs text-white/40 break-all",
+                        i { class: "fa-solid fa-globe mr-1" }
+                        "{reaches}"
+                    }
+                }
+                if plugin.reads_folders {
+                    p { class: "text-xs text-white/60",
+                        i { class: "fa-solid fa-triangle-exclamation mr-1" }
+                        "{i18n::t(\"plugin_reads_folders\")}"
+                    }
+                }
+                if let Some(update_reaches) = update_reaches {
+                    p { class: "text-xs text-white/60 break-all",
+                        i { class: "fa-solid fa-triangle-exclamation mr-1" }
+                        "{update_reaches}"
+                    }
+                }
+            }
+            // An update waiting for its hosts can replace an official plugin
+            // too, so it is approved whatever the origin; only removal is
+            // limited to community plugins.
+            if community || update.is_some() {
+                div { class: "flex items-center gap-2 shrink-0",
+                    if working {
+                        span { class: "text-sm text-white/60", "{i18n::t(\"plugin_working\")}" }
+                    } else if let Some(update) = update {
+                        button {
+                            class: "{button}",
+                            disabled: !idle,
+                            onclick: move |_| hooks::plugins::install(
+                                install_id.clone(),
+                                update.network.clone(),
+                                busy,
+                                changed,
+                            ),
+                            "{i18n::t(\"plugin_update\")}"
+                        }
+                        if removable {
+                            button {
+                                class: "{button}",
+                                disabled: !idle,
+                                onclick: move |_| hooks::plugins::uninstall(remove_id.clone(), busy, changed),
+                                "{i18n::t(\"plugin_remove\")}"
+                            }
+                        }
+                    } else if plugin.installed_version.is_none() {
+                        button {
+                            class: "{button}",
+                            disabled: !idle,
+                            onclick: move |_| hooks::plugins::install(
+                                install_id.clone(),
+                                install_network.clone(),
+                                busy,
+                                changed,
+                            ),
+                            "{i18n::t(\"plugin_install\")}"
+                        }
+                    } else if removable {
+                        button {
+                            class: "{button}",
+                            disabled: !idle,
+                            onclick: move |_| hooks::plugins::uninstall(remove_id.clone(), busy, changed),
+                            "{i18n::t(\"plugin_remove\")}"
+                        }
+                    }
+                }
+            }
+        }
     }
 }

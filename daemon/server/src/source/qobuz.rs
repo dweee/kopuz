@@ -100,6 +100,7 @@ impl QobuzSource {
             bitrate: None,
             content_length: None,
             loudness_db: None,
+            guard: None,
         };
         if let Some(token) = playback_token
             && let Ok(mut pending) = reports().lock()

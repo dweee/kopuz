@@ -12,7 +12,7 @@
   </a>
   <img src="https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white" alt="Rust">
   <img src="https://github.com/Kopuz-org/kopuz/actions/workflows/build.yml/badge.svg" alt="Build">
-  <img src="https://github.com/user-attachments/assets/ca88f0c0-15d7-4a4d-8e81-78a61a70084f" alt="Kopuz">
+  <img src="https://github.com/user-attachments/assets/4af320bb-4653-4bc0-b3ed-1afcf29db8ec" alt="Kopuz">
 
 <br/>
   <br/>
@@ -65,7 +65,8 @@ window is a client of it, and so is anything else you write — the contract is
 one gRPC schema on a local socket, documented in [docs/api.md](docs/api.md).
 `kopuzd` runs the same core with no window. Use [`kopuzctl`](docs/cli.md) to
 control playback, configure sources, and start library jobs from a terminal or
-script.
+script. Other apps and web pages can open a page, a search or a track in Kopuz
+with a [`kopuz://` link](docs/protocol.md).
 
 ## Features
 
@@ -365,13 +366,20 @@ brew install --cask --no-quarantine kopuz-org/tap/kopuz
 Install from the AUR using your preferred helper:
 
 ```bash
-yay -S kopuz-bin
+yay -S kopuz
 # or
-paru -S kopuz-bin
+paru -S kopuz
 ```
 
-`kopuz-bin` is Kopuz with `kopuzd`; `kopuz-legacy` builds Kopuz Legacy from
-source.
+Every release updates these on its own:
+
+| Package             | What you get                                       |
+| ------------------- | -------------------------------------------------- |
+| `kopuz`             | Kopuz with `kopuzd`, built from the release source |
+| `kopuz-bin`         | The same, from the release's prebuilt `.deb`       |
+| `kopuz-legacy`      | Kopuz Legacy, built from source                    |
+| `kopuz-nightly`     | Kopuz Nightly, built from the latest nightly tag   |
+| `kopuz-nightly-bin` | Kopuz Nightly, from the nightly's prebuilt `.deb`  |
 
 ### Flatpak (Recommended)
 
@@ -857,8 +865,7 @@ Both of these live on the Spotify row under **Settings → Media servers**:
 Saved tracks show up as favorites, saved albums as your library, and your
 playlists are browsable. There is a **Discover** page with On repeat, Jump back
 in, and All-time favorites, search across tracks/albums/artists, liking and
-unliking, and scrobbling to Last.fm, Libre.fm, and ListenBrainz like any other
-source.
+unliking, and scrobbling to Libre.fm and ListenBrainz like any other source.
 
 ### What Spotify limits
 

@@ -48,6 +48,30 @@
   </screenshots>
 
   <releases>
+    <release version="1.0.1" date="2026-11-20">
+      <description>
+        <p>Kopuz 1.0.1 fixes bugs reported after 1.0. The command palette works with the arrow keys again, scrolling no longer leaks between rows and pages, and the mini player can be reopened after closing it. It also shows audio quality in the player bar and Now Playing.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-11-19">
+      <description>
+        <p>Kopuz 1.0 introduces the native GPUI desktop app alongside Kopuz Legacy. This release adds a marketplace for source plugins, M3U playlist import, and playback output selection with exclusive ALSA support. It also adds romanized lyrics, sample rate and bit depth in track lists, and a persistent playlist sidebar in Legacy.</p>
+      </description>
+    </release>
+    <release version="0.67.0" date="2026-10-26">
+      <description>
+        <p>
+          Kopuz can play audio CDs and rip them to lossless FLAC with tags and artwork. Streamed songs can be kept in a size-limited offline cache, while offline mode plays downloaded and cached music and pauses online activity. Home now leads with the active service's feed, catalog pages reopen faster, and large album grids load as you scroll. YouTube Music artist pages gain Shuffle and Start Radio, music videos play on Linux, and settings and library controls are easier to use. This release also fixes expired YouTube sessions, source selection, playback highlights and streaming stalls on slow connections.
+        </p>
+      </description>
+    </release>
+    <release version="0.22.0" date="2026-10-20">
+      <description>
+        <p>
+          YouTube Music gains more browsing pages, search filters and suggestions, library and playlist actions, brand account switching, and a Song/Video switch that keeps your place. New playback controls cover streaming quality, autoplay radio, skipping explicit tracks and pausing listening history. Browser sign-in is easier, free-account streams are more reliable, and ListenBrainz can connect through a signed-in browser profile. Settings reload live, separate clients no longer overwrite each other's changes, and album identity, seek progress and context menus are more reliable. Daemon TCP connections now use an address without a token and have no authentication.
+        </p>
+      </description>
+    </release>
     <release version="0.21.0" date="2026-10-14">
       <description>
         <p>

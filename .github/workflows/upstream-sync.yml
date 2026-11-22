@@ -14,6 +14,7 @@ jobs:
       statuses: write
       id-token: write
       contents: write
+      pull-requests: write
       actions: write
       checks: read
     uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@84e6e965fb4ec7b343cba352999d6660161ddba0

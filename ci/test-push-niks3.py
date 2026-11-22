@@ -109,4 +109,41 @@ class Publication(unittest.TestCase):
         self.assertEqual(result['token'],value);self.assertIn('expires_at',result)
         self.assertIn('audience=https%3A%2F%2Fniks3.monke.fail',fetch.call_args.args[0].full_url)
 
+    def test_pin_is_passed_to_the_single_pushed_closure(self):
+        with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')) as run:
+            publisher.publish(self.manifest,'dweee-fixture.x86_64-linux.candidate')
+        args=run.call_args.args[0]
+        self.assertEqual(args[1],'push');self.assertEqual(args[args.index('--pin')+1],'dweee-fixture.x86_64-linux.candidate')
+        self.assertEqual(args[-1],self.path)
+    def test_pin_requires_exactly_one_valid_closure(self):
+        other='/nix/store/'+'b'*32+'-other'
+        for text,name in [(self.path+'\n'+other+'\n','fixture.pin'),(self.path+'\n','bad/name'),(self.path+'\n','.hidden')]:
+            self.manifest.write_text(text)
+            with self.subTest(name=name),patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run') as run:
+                with self.assertRaises(ValueError):publisher.publish(self.manifest,name)
+                run.assert_not_called()
+    def test_pins_are_upserted_and_never_deleted(self):
+        selection=self.root/'pins.json'
+        pins={'dweee-fixture.x86_64-linux.tested':self.path,'dweee-fixture.x86_64-linux.stable':'/nix/store/'+'b'*32+'-release-roots'}
+        selection.write_text(json.dumps(pins))
+        with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')) as run:
+            publisher.create_pins(selection)
+        calls=[c.args[0] for c in run.call_args_list]
+        self.assertEqual(len(calls),2)
+        for args in calls:
+            self.assertEqual(args[1:3],['pins','create']);self.assertNotIn('delete',args)
+            self.assertIn('--auth-token-path',args)
+            self.assertEqual(pins[args[-2]],args[-1])
+    def test_invalid_pin_selection_never_runs(self):
+        selection=self.root/'pins.json'
+        for value in [{},[],{'bad name':self.path},{'fixture.pin':'/tmp/x'},{'fixture.pin':self.path+'.drv'}]:
+            selection.write_text(json.dumps(value))
+            with self.subTest(value=value),patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run') as run:
+                with self.assertRaises(ValueError):publisher.create_pins(selection)
+                run.assert_not_called()
+    def test_rejected_pin_fails(self):
+        selection=self.root/'pins.json';selection.write_text(json.dumps({'fixture.pin':self.path}))
+        with patch.dict(os.environ,self.env,clear=True),patch.object(publisher.subprocess,'run',return_value=subprocess.CompletedProcess([],1,'','closure not found')):
+            with self.assertRaises(publisher.PublicationFailure):publisher.create_pins(selection)
+
 if __name__=='__main__':unittest.main()

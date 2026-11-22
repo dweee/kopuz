@@ -86,10 +86,10 @@ class ImmutableNativeTargetTests(unittest.TestCase):
         self.assertNotIn('target=".#', build)
         self.assertNotIn('".#checks.', build)
         self.assertLess(build.index('ci/native-target.py verify --outputs outputs.txt'),
-                        build.index('ci/transfer-attic.py export'))
+                        build.index('ci/transfer-closures.py export'))
         self.assertIn('ci/test-native-target.py', build)
         publisher = workflow.split("\n  publish:\n", 1)[1]
-        self.assertIn('ci/push-niks3.py --outputs attic-transfer/outputs.txt', publisher)
+        self.assertIn('ci/push-niks3.py --outputs closure-transfer/outputs.txt', publisher)
         self.assertNotIn('ci/push-attic.py', publisher)
         self.assertNotIn('ci/native-target.py', publisher)
 

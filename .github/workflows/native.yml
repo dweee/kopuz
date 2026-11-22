@@ -120,10 +120,9 @@ jobs:
       run: python3 ci/configure-niks3.py --oidc
     - name: Validate credential-free publication helpers
       run: |
-        python3 ci/test-push-attic.py
-        python3 ci/test-transfer-attic.py
+        python3 ci/test-push-niks3.py
+        python3 ci/test-transfer-closures.py
         python3 ci/test-public-closure.py
-        python3 ci/test-configure-attic-read.py
         python3 ci/test-native-target.py
     - name: Build native package and test Qobuz
       env:
@@ -157,14 +156,14 @@ jobs:
     - name: Save selected runtime closures independently of cache publication
       timeout-minutes: 15
       env:
-        ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '8192' }}
-      run: python3 ci/transfer-attic.py export --directory attic-transfer --manifest cache-outputs.txt
+        MAX_CLOSURE_MIB: ${{ vars.MAX_CLOSURE_MIB || '8192' }}
+      run: python3 ci/transfer-closures.py export --directory closure-transfer --manifest cache-outputs.txt
       id: cache_transfer
       if: ${{ always() && !cancelled() && hashFiles('cache-outputs.txt') != '' }}
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: nix-${{ matrix.system }}-${{ matrix.package }}-${{ github.sha }}
-        path: attic-transfer/
+        path: closure-transfer/
         retention-days: 1
         compression-level: 0
         if-no-files-found: error
@@ -178,7 +177,7 @@ jobs:
       contents: read
       id-token: write
     needs: build
-    if: ${{ always() && !cancelled() && ((needs.build.result == 'success' || needs.build.result == 'failure') && (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (vars.NIKS3_PUSH_ENABLED || vars.ATTIC_PUSH_ENABLED) == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
+    if: ${{ always() && !cancelled() && ((needs.build.result == 'success' || needs.build.result == 'failure') && (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && vars.NIKS3_PUSH_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     name: Publish ${{ matrix.package }} (${{ matrix.system }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -218,7 +217,7 @@ jobs:
     - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
         name: nix-${{ matrix.system }}-${{ matrix.package }}-${{ github.sha }}
-        path: attic-transfer
+        path: closure-transfer
     - name: Read Niks3 before installing the pinned publisher
       run: python3 ci/configure-niks3.py --oidc
     - name: Install pinned Niks3 publisher
@@ -228,10 +227,10 @@ jobs:
     - name: Import data without running any package programs
       timeout-minutes: 15
       env:
-        ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '8192' }}
-      run: python3 ci/transfer-attic.py import --directory attic-transfer
+        MAX_CLOSURE_MIB: ${{ vars.MAX_CLOSURE_MIB || '8192' }}
+      run: python3 ci/transfer-closures.py import --directory closure-transfer
     - name: Publish to Niks3 with GitHub OIDC and verify S3 integrity
-      run: python3 ci/push-niks3.py --outputs attic-transfer/outputs.txt
+      run: python3 ci/push-niks3.py --outputs closure-transfer/outputs.txt
     - name: Remove job-local Niks3 reader
       if: ${{ always() }}
       run: python3 ci/configure-niks3.py --cleanup

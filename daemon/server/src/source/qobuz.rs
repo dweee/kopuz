@@ -196,10 +196,12 @@ fn parse_track(value: &Value, fallback_album: Option<&Value>, source: &Source) -
         artist: artist.clone(),
         album: text(&album["title"]),
         duration: value["duration"].as_u64().unwrap_or(0),
-        khz: value["maximum_sampling_rate"]
-            .as_f64()
-            .unwrap_or(0.0)
-            .round() as u32,
+        // Qobuz reports kHz (e.g. 44.1, 96); Track stores Hz.
+        khz: (value["maximum_sampling_rate"].as_f64().unwrap_or(0.0) * 1000.0).round() as u32,
+        bit_depth: value["maximum_bit_depth"]
+            .as_u64()
+            .and_then(|n| n.try_into().ok())
+            .unwrap_or(0),
         bitrate: 0,
         track_number: value["track_number"]
             .as_u64()
@@ -550,14 +552,15 @@ mod tests {
     #[test]
     fn metadata_is_typed_and_scoped() {
         let source = Source::Server("qobuz-account-2".into());
-        let value = json!({"id":42,"title":"Song","version":"Live","duration":121,"track_number":2,"media_number":1,"playlist_track_id":99,"maximum_sampling_rate":96,"performer":{"id":3,"name":"Singer"},"album":{"id":"album-id","title":"Record","artist":{"name":"Singer"},"image":{"large":"https://example.org/art.jpg"}}});
+        let value = json!({"id":42,"title":"Song","version":"Live","duration":121,"track_number":2,"media_number":1,"playlist_track_id":99,"maximum_sampling_rate":96,"maximum_bit_depth":24,"performer":{"id":3,"name":"Singer"},"album":{"id":"album-id","title":"Record","artist":{"name":"Singer"},"image":{"large":"https://example.org/art.jpg"}}});
         let t = parse_track(&value, None, &source).unwrap();
         assert_eq!(t.id.uid(), "qobuz:42");
         assert_eq!(t.title, "Song (Live)");
         assert_eq!(t.album_id, "album-id");
         assert_eq!(t.credits[0].source, Some(source));
         assert_eq!(t.playlist_item_id.as_deref(), Some("99"));
-        assert_eq!(t.khz, 96);
+        assert_eq!(t.khz, 96_000);
+        assert_eq!(t.bit_depth, 24);
         assert!(t.id.local_path().is_none());
     }
     #[test]

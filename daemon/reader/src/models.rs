@@ -335,8 +335,8 @@ impl CoverRef {
             // need, so the sync caches art to disk and the ref carries a path.
             // A plugin's covers are self-contained too: it cannot rely on the
             // host knowing how to sign a URL for a service the host never saw.
-            "ytmusic" | "soundcloud" | "applemusic" | "qobuz" | "nextcloud" | "clippsly" | "smb"
-            | "plugin" => value.map_or(Self::None, Self::parse),
+            "ytmusic" | "soundcloud" | "applemusic" | "qobuz" | "nextcloud" | "clippsly"
+            | "smb" | "plugin" => value.map_or(Self::None, Self::parse),
             _ => Self::None,
         }
     }

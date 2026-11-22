@@ -787,7 +787,11 @@ impl ClassifiedLoad {
                                 message: "no active source for remote track".to_string(),
                             })?;
                             let info = source
-                                .resolve_stream_for_playback(item_id, self.stream_quality, self.token)
+                                .resolve_stream_for_playback(
+                                    item_id,
+                                    self.stream_quality,
+                                    self.token,
+                                )
                                 .await
                                 .map_err(|error| {
                                     tracing::error!(error = %error, "stream URL resolve failed");

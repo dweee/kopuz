@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
-spec = importlib.util.spec_from_file_location('transfer', Path(__file__).with_name('transfer-attic.py'))
+spec = importlib.util.spec_from_file_location('transfer', Path(__file__).with_name('transfer-closures.py'))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
@@ -18,7 +18,7 @@ spec.loader.exec_module(module)
 class TransferSafetyTests(unittest.TestCase):
     def test_transfer_limit_accepts_explicit_eight_gib_but_rejects_more(self):
         for value, expected in [('8192', 0), ('8193', 1), ('0', 1)]:
-            with self.subTest(value=value), patch.dict(os.environ, {'ATTIC_MAX_CLOSURE_MIB': value}), \
+            with self.subTest(value=value), patch.dict(os.environ, {'MAX_CLOSURE_MIB': value}), \
                     patch.object(module, 'transfer') as transfer, \
                     patch('sys.argv', ['transfer', 'export', '--directory', '/tmp/fixture']), \
                     contextlib.redirect_stderr(io.StringIO()):
@@ -30,7 +30,7 @@ class TransferSafetyTests(unittest.TestCase):
 
     def test_safe_failure_categories_do_not_expose_exception_details(self):
         cases = [
-            (module.TransferSizeExceeded('secret'), 'exceeded ATTIC_MAX_CLOSURE_MIB'),
+            (module.TransferSizeExceeded('secret'), 'exceeded MAX_CLOSURE_MIB'),
             (OSError(errno.ENOSPC, 'secret'), 'disk space or quota'),
             (OSError(errno.EDQUOT, 'secret'), 'disk space or quota'),
             (OSError(errno.EACCES, 'secret'), 'transfer failed'),
@@ -105,7 +105,7 @@ class TransferSafetyTests(unittest.TestCase):
             self.assertEqual(call.call_args_list[1].kwargs['timeout'], 120)
 
     def test_transfer_refuses_upload_credentials(self):
-        for name in ['ATTIC_TOKEN','FLAKEY_ATTIC_TOKEN','NIKS3_WRITE_TOKEN','NIKS3_AUTH_TOKEN_FILE']:
+        for name in ['NIKS3_WRITE_TOKEN','NIKS3_AUTH_TOKEN_FILE']:
             with self.subTest(name=name),tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {name:'synthetic-fixture'}):
                 with self.assertRaises(ValueError): module.transfer('export', Path(temporary), 1024)
 

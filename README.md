@@ -1062,10 +1062,7 @@ only its final upload step receives the cache credential. Pull requests never
 receive upload credentials. This workflow publishes Nix closures, not signed
 platform installers or upstream releases.
 
-Optional cache publication uses repository variable `ATTIC_PUSH_ENABLED=true`,
-variables `ATTIC_ENDPOINT`, `ATTIC_CACHE`, and secret `ATTIC_TOKEN` (restricted
-to upload only to that cache). Optional read-only cache settings are
-`ATTIC_SUBSTITUTER` and `ATTIC_PUBLIC_KEY`. `ATTIC_MAX_CLOSURE_MIB` defaults to
-4096. Store endpoint addresses and credentials in repository settings rather
-than this source tree. GitHub is the primary CI; a Forgejo mirror can retain the
+Cache publication requires repository variable `NIKS3_PUSH_ENABLED=true` and
+goes to the private Niks3 cache through GitHub OIDC; no cache credential is
+stored in the repository. `MAX_CLOSURE_MIB` sets the closure transfer limit. GitHub is the primary CI; a Forgejo mirror can retain the
 same source without needing a publicly named private runner.

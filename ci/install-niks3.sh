@@ -12,7 +12,7 @@ if [[ -n ${NATIVE_BUILD_ADMISSION_COMMAND:-} ]]; then
 fi
 # Only the later explicit publisher step receives write/forge/OIDC request
 # credentials. Keep the refreshing read-only Nix configuration for substitution.
-clean=(env -u ATTIC_TOKEN -u FLAKEY_ATTIC_TOKEN -u NIKS3_WRITE_TOKEN -u NIKS3_AUTH_TOKEN_FILE
+clean=(env -u NIKS3_WRITE_TOKEN -u NIKS3_AUTH_TOKEN_FILE
   -u GH_TOKEN -u GITHUB_TOKEN -u CHANNEL_TOKEN -u SOURCE_TOKEN -u SSH_AUTH_SOCK
   -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL)
 build=(nix build --option accept-flake-config false --out-link "${RUNNER_TEMP:-/tmp}/niks3-client" --print-out-paths "$target")

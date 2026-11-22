@@ -5,49 +5,37 @@ Managed source: dave-fork-ci/ci/release-channel.py. No activation or deletion.
 Only the promote command has forge write credentials.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
+from http.client import HTTPException
 import importlib.util
 import json
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import re
 import subprocess
 import sys
 import tempfile
+from threading import Condition, Thread
 import time
+from urllib.error import HTTPError
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 # Never write bytecode: consumers once tracked ci/__pycache__ and the rewrite
 # dirtied the checkout that the clean-checkout checks require.
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_ATTIC = 'https://attic.monke.fail'
-# The Attic host's address on the Forgejo runner network, reachable only from
-# jobs on the icicle-hosted `nix` runner. It serves the same cache and keys.
-INTERNAL_ATTIC = 'http://172.29.0.1:8080'
-# The same listener over the tailnet, for the host-mode braco runner.
-TAILNET_ATTIC = 'http://icicle.eel-ling.ts.net:8080'
-REVIEWED_ATTIC = {PUBLIC_ATTIC, INTERNAL_ATTIC, TAILNET_ATTIC}
 PUBLIC_CACHE = 'https://niks3.monke.fail'
-
-
-def attic_server(environ=None):
-    """Origin used to read the cache; the public one unless the job opts in.
-
-    Only the three reviewed origins are accepted, so a credential can reach plain
-    HTTP only at the private runner-network or tailnet address of the Attic host. Proofs and records never
-    store the transport; PUBLIC_CACHE is the one canonical cache identity.
-    """
-    value = (os.environ if environ is None else environ).get('ATTIC_SERVER', '').strip().rstrip('/')
-    if value and value not in REVIEWED_ATTIC:
-        raise ValueError('ATTIC_SERVER is not a reviewed Attic origin')
-    return value or PUBLIC_ATTIC
-
-
 CACHE = 'https://niks3.monke.fail' + ('/oidc' if json.loads((ROOT/'ci/channels.json').read_text()).get('forge') == 'github' else '')
 KEY = 'niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M='
 UPSTREAM = 'https://cache.nixos.org'
 UPSTREAM_KEY = 'cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
+# Signer of the historical NARs in retained archives (ci/retained-archives.md);
+# trusted only when verifying those exact archived paths.
+LEGACY_KEY = 'flakey:mDx4DiNpH5w1Pl8OAKFFWq1ZsypA9lbaFKNiRWhqYE8='
 STORE = re.compile(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/\s]+')
 SHA = re.compile(r'[a-f0-9]{40}')
 FLAGS = ['--option', 'accept-flake-config', 'false', '--no-update-lock-file', '--no-write-lock-file']
@@ -55,6 +43,11 @@ NO_BUILD = ['--option', 'max-jobs', '0', '--option', 'builders', '', '--option',
 
 
 ACTIVE_PHASE = 'startup'
+# GitHub serves job logs only after a job ends. Trusted GitHub release jobs
+# receive STATUS_TOKEN (checks: write) and keep one check run per system up to
+# date, so `gh api repos/OWNER/NAME/commits/SHA/check-runs` shows live progress.
+PROGRESS = {'system': None, 'sha': None, 'id': None, 'last': 0.0, 'disabled': False}
+PROGRESS_INTERVAL = 15
 
 
 def phase(label):
@@ -63,6 +56,55 @@ def phase(label):
         raise ValueError('Invalid release phase')
     ACTIVE_PHASE = label
     print('Release phase: ' + label, flush=True)
+
+
+def progress_request(method, path, body):
+    import urllib.request
+    request = urllib.request.Request(
+        'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + path,
+        data=json.dumps(body).encode(), method=method,
+        headers={'Authorization': 'Bearer ' + os.environ['STATUS_TOKEN'], 'Accept': 'application/vnd.github+json',
+                 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'release-channel-progress'})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read() or b'{}')
+
+
+def progress(description, state='pending', force=False):
+    """Best effort live progress; never fails the gate and never reaches Nix."""
+    if (PROGRESS['disabled'] or not os.environ.get('STATUS_TOKEN') or not PROGRESS['sha'] or not PROGRESS['system']
+            or os.environ.get('GITHUB_SERVER_URL') != 'https://github.com'
+            or not re.fullmatch(r'[\w.-]+/[\w.-]+', os.environ.get('GITHUB_REPOSITORY', ''))):
+        return False
+    now = time.monotonic()
+    final = state != 'pending'
+    if not (force or final) and now - PROGRESS['last'] < PROGRESS_INTERVAL:
+        return False
+    title = (PROGRESS['system'] + ' ' + description)[:200]
+    body = {'output': {'title': title, 'summary': title + '\n\nPhase: `' + ACTIVE_PHASE + '`'}}
+    if final:
+        body.update(status='completed', conclusion='success' if state == 'success' else 'failure')
+    else:
+        body['status'] = 'in_progress'
+    try:
+        if PROGRESS['id'] is None:
+            body.update(name='release progress / ' + PROGRESS['system'], head_sha=PROGRESS['sha'])
+            if re.fullmatch(r'\d+', os.environ.get('GITHUB_RUN_ID', '')):
+                body['details_url'] = ('https://github.com/' + os.environ['GITHUB_REPOSITORY']
+                                       + '/actions/runs/' + os.environ['GITHUB_RUN_ID'])
+            created = progress_request('POST', '/check-runs', body)
+            if not isinstance(created.get('id'), int):
+                raise ValueError('No check run id')
+            PROGRESS['id'] = created['id']
+        else:
+            progress_request('PATCH', '/check-runs/' + str(PROGRESS['id']), body)
+    except Exception:
+        # Progress is advisory. Stop after the first failure instead of
+        # slowing every later target with timeouts.
+        PROGRESS['disabled'] = True
+        print('Release progress check run unavailable; continuing without it', file=sys.stderr, flush=True)
+        return False
+    PROGRESS['last'] = now
+    return True
 
 
 class CommandFailure(RuntimeError):
@@ -79,13 +121,13 @@ def failure_category(diagnostic):
         ('cache-integrity', r'nar.*hash mismatch|corrupted path|invalid nar'),
         ('cache-metadata-mismatch', r'published metadata differs|publication changed'),
         ('cache-missing-output', r'incomplete cache publication|required cache output is missing'),
-        ('cache-signature', r'lacks a signature|is not signed|invalid signature|no trusted signature'),
+        ('cache-signature', r'lacks a signature|is not signed|invalid signature|no trusted signature|is untrusted'),
         ('authorization', r'HTTP[^\n]*(?:401|403)|unauthorized|forbidden|authentication failed'),
         ('daemon-unavailable', r"remote store 'daemon'|cannot connect to socket|daemon-socket"),
         ('transport', r'unexpected eof|http/2|framing|connection reset|timed out|timeout|internalservererror|HTTP[^\n]*50[0-9]|'
                       r'could not resolve host|resolving timed out|temporary failure in name resolution|connection refused|'
                       r'couldn.t connect|failed to connect|ssl connect error|partial file|transfer closed'),
-        ('missing-input-or-output', r'HTTP[^\n]*404|does not exist|no such file'),
+        ('missing-input-or-output', r'HTTP[^\n]*404|does not exist|no such file|is not valid'),
         ('evaluation', r'evaluation aborted|attribute[^\n]*missing|syntax error|infinite recursion|assertion'),
         ('build', r'builder for[^\n]*failed|ninja[^\n]*stopped|failed with exit code'),
     ]
@@ -160,11 +202,14 @@ def with_transport_retries(args, attempt, sleep=None):
             ensure_daemon()
 
 
-def run(*args, env=None):
+def run(*args, env=None, deadline=None):
     def attempt():
+        timeout = 6*3600 if deadline is None else probe_time_left(deadline)
         try:
-            result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
+            result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
+            if deadline is not None:
+                raise TimeoutError from None
             raise CommandFailure('command deadline exceeded') from None
         if result.returncode:
             # Nix diagnostics may contain private paths or authenticated URLs. Emit
@@ -180,7 +225,7 @@ def run(*args, env=None):
             detail = safe_detail(diagnostic)
             raise CommandFailure(message + (': ' + detail if detail else ''), category)
         return result.stdout.strip()
-    return with_transport_retries(args, attempt)
+    return with_transport_retries(args, attempt) if deadline is None else attempt()
 
 
 def dirty_tracked_paths(limit=20):
@@ -262,13 +307,13 @@ def build_environment(env):
         os.environ.update(previous)
 
 
-def info(paths, env, store=None):
+def info(paths, env, store=None, **kwargs):
     args = ['nix', 'path-info', '--json']
     if store:
         args += ['--store', store]
     else:
         args += ['--recursive']
-    value = json.loads(run(*args, *paths, env=env))
+    value = json.loads(run(*args, *paths, env=env, **kwargs))
     if isinstance(value, list):
         value = {entry['path']: entry for entry in value}
     if not isinstance(value, dict):
@@ -303,10 +348,10 @@ def remote_env(env, directory):
                 'trusted-public-keys = ' + KEY + ' ' + UPSTREAM_KEY + '\nextra-trusted-public-keys =\n'
                 'require-sigs = true\nfallback = false\nnarinfo-cache-negative-ttl = 0\n'
                 'narinfo-cache-positive-ttl = 86400\ndownload-attempts = 5\n'
-                'http2 = ' + ('true' if os.environ.get('ATTIC_HTTP2') == 'true' else 'false') + '\n')
+                'http2 = ' + ('true' if os.environ.get('CACHE_HTTP2') == 'true' else 'false') + '\n')
 
 
-def verify(roots, expected, env):
+def verify(roots, expected, env, archived_cache=None, archived_paths=()):
     if not roots or not expected or not set(roots) <= set(expected):
         raise ValueError('Missing required output')
     if any(not STORE.fullmatch(p) or p.endswith('.drv') for p in expected):
@@ -315,15 +360,23 @@ def verify(roots, expected, env):
     if any(ref not in expected for e in expected.values() for ref in e['references']):
         raise ValueError('Incomplete closure')
     # Roots must come from our publisher. Dependencies can use the reviewed
-    # upstream cache when Attic's upstream-signature filter omits them.
+    # upstream cache when the publisher skipped them as already upstream.
     origins = {}
     adopted = []
     with tempfile.TemporaryDirectory(prefix='channel-read-') as directory:
         reader = remote_env(env, directory)
         for path, entry in list(expected.items()):
-            for origin in ([CACHE] if path in roots else [CACHE, UPSTREAM]):
+            candidates = ([archived_cache] if path in archived_paths else
+                          [CACHE] if path in roots else [CACHE, UPSTREAM])
+            for origin in candidates:
+                selected_reader = reader
+                if origin == archived_cache:
+                    # The archive itself was freshly verified/copied from Niks3.
+                    # Only its exact historical NARs may use the original signer.
+                    selected_reader = dict(reader, NIX_CONFIG=reader['NIX_CONFIG'] +
+                                           '\ntrusted-public-keys = ' + KEY + ' ' + UPSTREAM_KEY + ' ' + LEGACY_KEY + '\n')
                 try:
-                    remote = info([path], reader, origin)
+                    remote = info([path], selected_reader, origin)
                 except RuntimeError:
                     if origin == UPSTREAM or path in roots:
                         raise
@@ -333,12 +386,12 @@ def verify(roots, expected, env):
                 actual = metadata(remote[path])
                 if actual != entry:
                     # Another publisher already holds a different build of this
-                    # input-addressed path, and Attic keeps that first copy. A
+                    # input-addressed path, and the cache keeps that first copy. A
                     # non-reproducible rebuild cannot replace it. Adopt the
                     # signed cached copy only when its references match, then
                     # read and verify its bytes like any other member. Both
                     # metadata digests are logged.
-                    adopt = origin == CACHE and actual['references'] == entry['references']
+                    adopt = archived_cache is None and origin == CACHE and actual['references'] == entry['references']
                     report_metadata_difference(path, roots, origin, entry, actual,
                                                action='adopted' if adopt else 'rejected')
                     if not adopt:
@@ -347,7 +400,7 @@ def verify(roots, expected, env):
                     adopted.append(path)
                 # Reads NAR bytes, verifies hash and signature; no --no-contents,
                 # local-store fallback, source build or metadata-only success.
-                run('nix', 'store', 'verify', '--store', origin, '--sigs-needed', '1', path, env=reader)
+                run('nix', 'store', 'verify', '--store', origin, '--sigs-needed', '1', path, env=selected_reader)
                 origins[path] = origin
                 break
             if path not in origins:
@@ -367,6 +420,117 @@ def verify(roots, expected, env):
         if os.environ.get('GITHUB_STEP_SUMMARY'):
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
                 summary.write(message + '\n')
+    return digest({'roots': sorted(roots), 'metadata': expected})
+
+
+# Promotion reads narinfo metadata only. Lookups run in parallel batches; a
+# batch that contains a missing path is split until the missing path is found.
+METADATA_WORKERS = 16
+METADATA_BATCH = 32
+SIGNATURE_BATCH = 400
+
+
+def batches(values, size):
+    values = sorted(values)
+    return [values[index:index+size] for index in range(0, len(values), size)]
+
+
+def origin_reader(reader, origin):
+    """Each origin must sign its own copies with its own key and no other."""
+    key = KEY if origin == CACHE else UPSTREAM_KEY
+    return dict(reader, NIX_CONFIG=reader['NIX_CONFIG'] + '\ntrusted-public-keys = ' + key + '\n')
+
+
+def published_metadata(paths, origin, reader):
+    """Narinfo metadata the origin serves for paths; None marks a missing path."""
+    def lookup(batch):
+        try:
+            found = info(batch, reader, origin)
+        except CommandFailure as error:
+            if error.category != 'missing-input-or-output':
+                raise
+            if len(batch) == 1:
+                return {batch[0]: None}
+            middle = len(batch) // 2
+            return {**lookup(batch[:middle]), **lookup(batch[middle:])}
+        if set(found) != set(batch):
+            raise ValueError('Invalid remote metadata response')
+        return {path: (None if entry is None else metadata(entry)) for path, entry in found.items()}
+    result = {}
+    with ThreadPoolExecutor(max_workers=METADATA_WORKERS) as pool:
+        for part in pool.map(lookup, batches(paths, METADATA_BATCH)):
+            result.update(part)
+    return result
+
+
+def verify_signatures(paths, origin, reader, **kwargs):
+    """Check narinfo signatures against the origin's key without reading NARs."""
+    for batch in batches(paths, SIGNATURE_BATCH):
+        run('nix', 'store', 'verify', '--store', origin, '--no-contents', '--sigs-needed', '1', *batch, env=reader, **kwargs)
+
+
+def verify_published(roots, expected, env):
+    """Promotion gate: every closure path is published, signed and matches the build.
+
+    Roots must be served by Niks3 with the Niks3 signature. Other paths may come
+    from Niks3 (Niks3 signature) or, when Niks3 omitted them, from the official
+    upstream cache (upstream signature). Metadata (narHash, narSize, references)
+    must equal the build, which the signature binds. NAR bytes are not read
+    here; the daily retention audit reads them. Returns the same closure digest
+    as verify(), so existing proofs and audits stay comparable.
+    """
+    if not roots or not expected or not set(roots) <= set(expected):
+        raise ValueError('Missing required output')
+    if any(not STORE.fullmatch(p) or p.endswith('.drv') for p in expected):
+        raise ValueError('Invalid closure path')
+    expected = {p: metadata(e) for p, e in expected.items()}
+    if any(ref not in expected for e in expected.values() for ref in e['references']):
+        raise ValueError('Incomplete closure')
+    adopted = []
+    with tempfile.TemporaryDirectory(prefix='channel-metadata-') as directory:
+        base = remote_env(env, directory)
+        published = {}
+        remaining = set(expected)
+        for origin in [CACHE, UPSTREAM]:
+            if not remaining:
+                break
+            reader = origin_reader(base, origin)
+            found = published_metadata(remaining, origin, reader)
+            missing = {p for p, entry in found.items() if entry is None}
+            if origin == CACHE and missing & set(roots):
+                raise ValueError('Required cache output is missing')
+            present = set(found) - missing
+            for path in sorted(present):
+                actual = found[path]
+                if actual != expected[path]:
+                    # Same adoption rule as verify(): another publisher already
+                    # holds a signed build of this input-addressed path with the
+                    # same references. Its metadata enters the proof.
+                    adopt = origin == CACHE and actual['references'] == expected[path]['references']
+                    report_metadata_difference(path, roots, origin, expected[path], actual,
+                                               action='adopted' if adopt else 'rejected')
+                    if not adopt:
+                        raise ValueError('Published metadata differs from build')
+                    expected[path] = actual
+                    adopted.append(path)
+            if present:
+                verify_signatures(present, origin, reader)
+            published.update({p: origin for p in present})
+            remaining = missing
+        if remaining:
+            raise ValueError('Incomplete cache publication')
+    counts = {name: sum(1 for o in published.values() if o == origin)
+              for name, origin in [('niks3', CACHE), ('upstream', UPSTREAM)]}
+    message = ('Verified signed narinfo metadata for ' + str(len(published)) + ' closure paths ('
+               + str(counts['niks3']) + ' Niks3, ' + str(counts['upstream']) + ' upstream); NAR bytes are '
+               'audited by the scheduled retention run.')
+    if adopted:
+        message += (f' Adopted {len(adopted)} existing signed cache realisation(s) whose metadata '
+                    'differs from this non-reproducible build.')
+    print(message, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+            summary.write(message + '\n')
     return digest({'roots': sorted(roots), 'metadata': expected})
 
 
@@ -398,6 +562,85 @@ def remote_closure(roots, env):
     return expected
 
 
+def archived_manifest(directory, rules, sha, system, record, roots):
+    """Validate data-only historical variants against the original immutable proof."""
+    directory = Path(directory)
+    manifest = directory / 'manifest.json'
+    if (manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 32*1024*1024):
+        raise ValueError('Invalid retained archive manifest')
+    value = json.loads(manifest.read_text())
+    if (value.get('version') != 1 or value.get('commit') != sha
+            or value.get('policy') != digest(rules) or value.get('system') != system
+            or value.get('roots') != sorted(roots)):
+        raise ValueError('Retained archive source/policy/roots differ')
+    raw = value.get('metadata')
+    if not isinstance(raw, dict) or not raw or len(raw) > 50000:
+        raise ValueError('Invalid retained archive metadata')
+    if any(not isinstance(p, str) or not STORE.fullmatch(p) or p.endswith('.drv') for p in raw):
+        raise ValueError('Invalid retained archive store path')
+    expected = {p: metadata(e) for p, e in raw.items()}
+    if (not set(roots) <= set(expected)
+            or any(ref not in expected for e in expected.values() for ref in e['references'])):
+        raise ValueError('Incomplete retained archive closure')
+    closure = digest({'roots': sorted(roots), 'metadata': expected})
+    proof = digest({'commit': sha, 'policy': digest(rules), 'system': system, 'closure': closure})
+    if proof != record['proofs'].get(system):
+        raise ValueError('Retained archive differs from original build proof')
+    paths = value.get('archivedPaths')
+    if (not isinstance(paths, list) or not paths or any(not isinstance(p, str) for p in paths)
+            or len(paths) != len(set(paths))
+            or not set(paths) <= set(expected)):
+        raise ValueError('Invalid retained archive variant selection')
+    cache = directory / 'cache'
+    if cache.is_symlink() or not cache.is_dir():
+        raise ValueError('Invalid retained archive cache')
+    cache_info = cache / 'nix-cache-info'
+    if (cache_info.is_symlink() or not cache_info.is_file() or cache_info.stat().st_size > 65536
+            or 'StoreDir: /nix/store' not in cache_info.read_text().splitlines()):
+        raise ValueError('Invalid retained archive store directory')
+    names = {p.removeprefix('/nix/store/').split('-', 1)[0] + '.narinfo' for p in paths}
+    if {p.name for p in cache.glob('*.narinfo')} != names:
+        raise ValueError('Retained archive has unselected narinfos')
+    for path in paths:
+        stem = path.removeprefix('/nix/store/').split('-', 1)[0]
+        narinfo = cache / (stem + '.narinfo')
+        nar = cache / 'nar' / (stem + '.nar')
+        if (narinfo.is_symlink() or not narinfo.is_file() or narinfo.stat().st_size > 1024*1024
+                or nar.is_symlink() or not nar.is_file()
+                or nar.resolve().parent != cache.resolve() / 'nar'):
+            raise ValueError('Invalid retained archive payload')
+        urls = [line[5:] for line in narinfo.read_text().splitlines() if line.startswith('URL: ')]
+        if urls != ['nar/' + stem + '.nar']:
+            raise ValueError('Retained archive NAR must stay in its data directory')
+    return expected, cache.as_uri(), set(paths)
+
+
+def retained_archive(rules, sha, system, record, roots, env):
+    config = ROOT / 'ci/retained-archives.json'
+    if not config.exists():
+        return None
+    if config.stat().st_size > 1024*1024:
+        raise ValueError('Oversize retained archive selection')
+    value = json.loads(config.read_text())
+    if value.get('version') != 1 or not isinstance(value.get('releases'), dict):
+        raise ValueError('Invalid retained archive selection')
+    selected = value['releases'].get(sha, {})
+    if not isinstance(selected, dict):
+        raise ValueError('Invalid retained archive platform selection')
+    path = selected.get(system)
+    if path is None:
+        return None
+    if not isinstance(path, str) or not STORE.fullmatch(path) or path.endswith('.drv'):
+        raise ValueError('Invalid retained archive store path')
+    phase('read-retained-archive')
+    with tempfile.TemporaryDirectory(prefix='retained-archive-read-') as directory:
+        reader = remote_env(env, directory)
+        # Always read the outer archive NAR, even when a previous job imported it.
+        run('nix', 'store', 'verify', '--store', CACHE, '--sigs-needed', '1', path, env=reader)
+        run('nix', 'copy', '--from', CACHE, path, env=reader)
+    return archived_manifest(path, rules, sha, system, record, roots)
+
+
 def evaluated_roots(rules, system, flake=None, expression=None, env=None):
     targets = rules['targets'][system]
     selected = ' '.join('f.' + t['attribute'] for t in targets)
@@ -418,6 +661,29 @@ def native_check_names(flake, system, env):
     return json.loads(run('nix', 'eval', '--json', '--expr', expression, *FLAGS, env=env))
 
 
+def native_check_outputs(flake, system, env):
+    """Output paths of every native check, evaluated once without building."""
+    expression = ('builtins.mapAttrs (n: d: map (o: d.${o}.outPath) (d.outputs or [ "out" ])) '
+                  '((builtins.getFlake '+json.dumps(flake)+').checks.'+system+' or {})')
+    value = json.loads(run('nix', 'eval', '--json', '--expr', expression, *FLAGS, *NO_BUILD, env=env))
+    if (not isinstance(value, dict) or any(not isinstance(v, list) or not v for v in value.values())
+            or any(not isinstance(p, str) or not STORE.fullmatch(p) or p.endswith('.drv') for v in value.values() for p in v)):
+        raise ValueError('Invalid native check outputs')
+    return value
+
+
+def distinct_checks(check_outputs, roots):
+    """Checks to build: those whose outputs are not already built inventory roots.
+
+    A flake that reuses packages as checks (`checks = self.packages // {...}`)
+    would otherwise rebuild, re-upload and re-inspect every package a second
+    time. The same output path is the same derivation output, already built,
+    published and covered by the closure gate.
+    """
+    built = set(roots)
+    return sorted(name for name, paths in check_outputs.items() if not set(paths) <= built)
+
+
 def audit(rules, sha, system, record, env, flake=None, expression=None):
     phase('validate-retained-proof')
     if (record.get('commit') != sha or record.get('policy') != digest(rules)
@@ -425,10 +691,12 @@ def audit(rules, sha, system, record, env, flake=None, expression=None):
         raise ValueError('Release source/policy differs from immutable proof')
     phase('evaluate-retained-roots')
     roots = evaluated_roots(rules, system, flake, expression, env)
+    archive = retained_archive(rules, sha, system, record, roots, env)
     phase('discover-retained-closure')
-    expected = remote_closure(roots, env)
+    expected = archive[0] if archive else remote_closure(roots, env)
     phase('verify-retained-cache')
-    closure = verify(roots, expected, env)
+    closure = (verify(roots, expected, env, archived_cache=archive[1], archived_paths=archive[2])
+               if archive else verify(roots, expected, env))
     phase('compare-retained-proof')
     proof = digest({'commit': sha, 'policy': digest(rules), 'system': system, 'closure': closure})
     if record['proofs'].get(system) != proof:
@@ -445,8 +713,13 @@ def audit(rules, sha, system, record, env, flake=None, expression=None):
     return {'commit': sha, 'system': system, 'policy': digest(rules), 'proof': proof, 'roots': roots}
 
 
-def release_refs(rules):
-    """Advertised channels plus three recent releases per channel; no deletion."""
+def release_ledger(rules):
+    """Advertised channels plus three recent releases per channel; no deletion.
+
+    Returns ({sha: immutable tag record}, {role: sha}). Roles are `tested` and
+    `stable` (the advertised pointers) and `<channel>-recent-<n>` for the n-th
+    newest immutable tag of that channel.
+    """
     token = os.environ.get('SOURCE_TOKEN') or os.environ.get('CHANNEL_TOKEN')
     if rules['forge'] == 'forgejo' and not token:
         raise ValueError('A repository read credential is required')
@@ -460,11 +733,16 @@ def release_refs(rules):
             'refs/tags/tested-*:refs/tags/tested-*', 'refs/tags/stable-*:refs/tags/stable-*', env=env)
         names = run(*git, 'for-each-ref', '--sort=-creatordate', '--format=%(refname)', 'refs/tags').splitlines()
         selected = set()
+        roles = {}
         for channel in ['tested', 'stable']:
-            selected.update([n for n in names if n.startswith('refs/tags/'+channel+'-')][:3])
+            recent = [n for n in names if n.startswith('refs/tags/'+channel+'-')][:3]
+            selected.update(recent)
+            for number, name in enumerate(recent, 1):
+                roles[channel+'-recent-'+str(number)] = name.rsplit('-', 1)[-1]
             pointer = run('git', '-c', 'credential.helper=', 'ls-remote', rules['remote'], 'refs/heads/'+channel, env=env)
             if pointer:
                 selected.add('refs/tags/'+channel+'-'+pointer.split()[0])
+                roles[channel] = pointer.split()[0]
         result = {}
         for name in sorted(selected):
             sha = name.rsplit('-', 1)[-1]
@@ -473,7 +751,74 @@ def release_refs(rules):
             raw = run(*git, 'cat-file', 'tag', name)
             record = json.loads(raw.split('\n\n', 1)[1])
             result[sha] = record
-        return result
+        if any(sha not in result for sha in roles.values()):
+            raise ValueError('Advertised channel has no immutable release tag')
+        return result, roles
+
+
+def release_refs(rules):
+    return release_ledger(rules)[0]
+
+
+# Niks3 garbage-collects closures that were not pushed within its retention
+# window unless a pin names them. Each release records one small manifest per
+# system whose references are exactly its roots. Pins are upserted, never
+# deleted, under fixed role names, so the pinned set stays bounded: the
+# candidate being built plus the advertised and recent recovery releases.
+MANIFEST = re.compile(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-release-roots')
+PIN_ROLES = ['tested', 'stable'] + [c + '-recent-' + str(n) for c in ['tested', 'stable'] for n in (1, 2, 3)]
+
+
+def pin_name(rules, system, role):
+    if role not in PIN_ROLES + ['candidate'] or system not in {'x86_64-linux', 'aarch64-linux', 'aarch64-darwin', 'x86_64-darwin'}:
+        raise ValueError('Invalid retention pin')
+    return rules['repository'].replace('/', '-') + '.' + system + '.' + role
+
+
+def release_manifest(roots, env):
+    """A store path whose references are the release roots; nothing is built."""
+    if not roots or any(not STORE.fullmatch(p) or p.endswith('.drv') for p in roots):
+        raise ValueError('Invalid release roots')
+    expression = ('builtins.toFile "release-roots" (builtins.concatStringsSep "\\n" '
+                  '(map builtins.storePath (builtins.fromJSON ' + json.dumps(json.dumps(sorted(roots))) + ')) + "\\n")')
+    path = run('nix', 'eval', '--impure', '--raw', '--expr', expression, *NO_BUILD, env=env)
+    if not MANIFEST.fullmatch(path):
+        raise ValueError('Invalid release manifest')
+    return path
+
+
+def retention_pins(rules, system, records, roles):
+    """Role pin name -> recorded manifest; releases from before manifests are skipped."""
+    pins = {}
+    for role, sha in sorted(roles.items()):
+        manifest = (records.get(sha, {}).get('retention') or {}).get(system)
+        if manifest is None:
+            print('Release for retention role ' + role + ' predates retention manifests; '
+                  'Niks3 keeps it only for its push-age window', flush=True)
+            continue
+        if not isinstance(manifest, str) or not MANIFEST.fullmatch(manifest):
+            raise ValueError('Invalid recorded retention manifest')
+        pins[pin_name(rules, system, role)] = manifest
+    return pins
+
+
+def pin_release(rules, system, roots, env, publish_env, directory):
+    """Re-pin the recovery releases, then pin this candidate. Returns its manifest."""
+    phase('read-release-ledgers')
+    records, roles = release_ledger(rules)
+    pins = retention_pins(rules, system, records, roles)
+    if pins:
+        phase('pin-recovery-releases')
+        selection = Path(directory) / 'pins.json'
+        selection.write_text(json.dumps(pins, sort_keys=True))
+        run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--pins', str(selection), env=publish_env)
+    phase('pin-release-candidate')
+    manifest = release_manifest(roots, env)
+    outputs = Path(directory) / 'manifest.txt'
+    outputs.write_text(manifest + '\n')
+    run(sys.executable, str(ROOT / 'ci/push-niks3.py'), '--outputs', str(outputs),
+        '--pin', pin_name(rules, system, 'candidate'), env=publish_env)
+    return manifest
 
 
 def retain(system):
@@ -481,7 +826,7 @@ def retain(system):
     rules = policy()
     phase('read-release-ledgers')
     records = release_refs(rules)
-    env = {k:v for k,v in os.environ.items() if k not in {'ATTIC_TOKEN','CHANNEL_TOKEN','SOURCE_TOKEN','GITHUB_TOKEN','GH_TOKEN'}}
+    env = {k:v for k,v in os.environ.items() if k not in {'CHANNEL_TOKEN','SOURCE_TOKEN','GITHUB_TOKEN','GH_TOKEN'}}
     for sha, record in records.items():
         # Read-only source credential is confined to Git fetch. Historical
         # helper programs are never executed; Nix only evaluates their flake.
@@ -591,13 +936,242 @@ def derivation_output_paths(target, env):
     return paths
 
 
+PUBLIC_PROBE_SECONDS = 60
+PUBLIC_ORIGIN_FAILURES = 8
+PUBLIC_ORIGIN_WORKERS = 12
+NAR_COMPRESSION_MAGIC = {'zstd': b'\x28', 'xz': b'\xfd', 'bzip2': b'B', 'none': b'\x0d'}
+
+
+def probe_time_left(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    return remaining
+
+
+def same_public_origin(url, origin):
+    target = urlsplit(url)
+    return target.scheme == 'https' and target.netloc.lower() == urlsplit(origin).netloc.lower()
+
+
+class PublicCacheRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, url):
+        # urllib drains followed redirect bodies without a byte limit.
+        return None
+
+
+class NarProbeMiss(Exception):
+    """The cache did not provide usable evidence that the NAR is available."""
+
+
+def public_narinfo(origin, key, path, deadline):
+    """Return unchanged narinfo bytes, or None for a narinfo miss."""
+    base = origin.rstrip('/') + '/'
+    name = path.removeprefix('/nix/store/')[:32] + '.narinfo'
+    open_public = build_opener(PublicCacheRedirect()).open
+    headers = {'Cache-Control': 'no-cache', 'User-Agent': 'dave-fork-ci/1'}
+    checking_nar = False
+    try:
+        with open_public(Request(base + name, headers=headers), timeout=min(5, probe_time_left(deadline))) as response:
+            if response.status != 200 or not same_public_origin(response.url, origin):
+                return None
+            data = response.read(64 * 1024 + 1)
+        if len(data) > 64 * 1024:
+            return None
+        lines = data.decode().split('\n')
+        if [line for line in lines if line.startswith('StorePath:')] != ['StorePath: ' + path]:
+            return None
+        urls = [line for line in lines if line.startswith('URL:')]
+        prefix = 'Sig: ' + key.split(':', 1)[0] + ':'
+        if (len(urls) != 1 or not re.fullmatch(r'URL: [!-~]+', urls[0]) or '\\' in urls[0]
+                or not any(line.startswith(prefix) for line in lines)):
+            return None
+        sizes = [line for line in lines if line.startswith('FileSize:')]
+        magic = None
+        if sizes:
+            if len(sizes) != 1 or not re.fullmatch(r'FileSize: [1-9][0-9]*', sizes[0]):
+                raise NarProbeMiss
+            expected_total = sizes[0].removeprefix('FileSize: ')
+        else:
+            compression = [line.removeprefix('Compression: ') for line in lines if line.startswith('Compression:')]
+            if len(compression) != 1 or compression[0] not in NAR_COMPRESSION_MAGIC:
+                raise NarProbeMiss
+            magic = NAR_COMPRESSION_MAGIC[compression[0]]
+            expected_total = r'[1-9][0-9]*'
+        expected_range = 'bytes 0-0/' + expected_total
+        # Check that a ranged GET can read the matching NAR from the same cache.
+        nar = urljoin(base, urls[0][5:])
+        if not same_public_origin(nar, origin):
+            raise NarProbeMiss
+        checking_nar = True
+        with open_public(Request(nar, headers=dict(headers, Range='bytes=0-0')),
+                         timeout=min(5, probe_time_left(deadline))) as response:
+            if (response.status != 206 or not same_public_origin(response.url, origin)
+                    or not re.fullmatch(expected_range, response.headers.get('Content-Range', ''))
+                    or response.headers.get('Content-Length', '1') != '1'):
+                raise NarProbeMiss
+            first_byte = response.read(1)
+            if len(first_byte) != 1 or (magic is not None and first_byte != magic):
+                raise NarProbeMiss
+        return data
+    except HTTPError as error:
+        error.close()
+        if ((checking_nar and error.code == 404) or error.code in {401, 403, 408, 429}
+                or 500 <= error.code < 600):
+            raise OSError('public cache unavailable') from None
+        if checking_nar:
+            raise NarProbeMiss from None
+        return None
+    except ValueError:
+        return None
+
+
+def probe_public_caches(work, deadline):
+    pending = {}
+    results = SimpleQueue()
+    failures = {}
+    active = {}
+    available = Condition()
+    for item in work:
+        pending.setdefault(item[0], []).append(item)
+
+    def probe():
+        while True:
+            with available:
+                while pending and time.monotonic() < deadline:
+                    origin = next((url for url in pending if active.get(url, 0) < PUBLIC_ORIGIN_WORKERS), None)
+                    if origin is not None:
+                        break
+                    available.wait(timeout=max(0, deadline - time.monotonic()))
+                else:
+                    return
+                items = pending[origin]
+                item = items.pop()
+                if not items:
+                    del pending[origin]
+                    if not pending:
+                        available.notify_all()
+                if failures.get(origin, 0) >= PUBLIC_ORIGIN_FAILURES:
+                    results.put((item, None, 'cutoff'))
+                    continue
+                active[origin] = active.get(origin, 0) + 1
+            narinfo = reason = None
+            try:
+                narinfo = public_narinfo(*item, deadline)
+            except NarProbeMiss:
+                reason = 'nar-miss'
+            except (OSError, HTTPException):
+                reason = 'unavailable'
+            finally:
+                with available:
+                    if reason == 'unavailable':
+                        failures[origin] = failures.get(origin, 0) + 1
+                    elif failures.get(origin, 0) < PUBLIC_ORIGIN_FAILURES:
+                        failures[origin] = 0
+                    active[origin] -= 1
+                    available.notify()
+            results.put((item, narinfo, reason))
+
+    # DNS and slow reads can outlive socket timeouts. Only the caller stages
+    # results, and it never joins workers or waits past the shared deadline.
+    for _ in range(min(METADATA_WORKERS, len(work))):
+        Thread(target=probe, daemon=True).start()
+    for _ in work:
+        try:
+            item, narinfo, reason = results.get(timeout=probe_time_left(deadline))
+        except (Empty, TimeoutError):
+            return
+        if time.monotonic() >= deadline:
+            return
+        yield item, narinfo, reason
+
+
+def served_build_outputs(entries, env):
+    """Prove availability with bounded, read-only probes and Nix signature checks."""
+    caches = module('cache-config.py').PUBLIC_CACHES
+    work = set()
+    for path, entry in entries.items():
+        if entry.get('ultimate') is True or not set(entry['references']) <= entries.keys():
+            # A reference outside this inventory could otherwise lose its only
+            # copy. Keep this root and its recursive closure in the transfer.
+            continue
+        names = {sig.partition(':')[0] for sig in entry.get('signatures', []) if ':' in sig}
+        # Recorded signers only schedule probes. They never prove availability.
+        work.update((origin, key, path) for origin, key in caches.items() if key.split(':', 1)[0] in names)
+    if not caches and entries:
+        print(f'Public-cache probing unavailable; kept {len(entries)} paths.', file=sys.stderr, flush=True)
+    if not work:
+        return set()
+
+    served = set()
+    overdue = set()
+    unavailable = set()
+    cutoff = set()
+    nar_misses = set()
+    remaining = work.copy()
+    deadline = time.monotonic() + PUBLIC_PROBE_SECONDS
+    # Reserve time to verify responses even when one origin hangs.
+    network_deadline = deadline - PUBLIC_PROBE_SECONDS / 5
+    with tempfile.TemporaryDirectory(prefix='public-build-cache-') as directory:
+        staged = {}
+        for item, narinfo, reason in probe_public_caches(work, network_deadline):
+            remaining.remove(item)
+            origin, key, path = item
+            if reason == 'cutoff':
+                cutoff.add(path)
+            elif reason == 'unavailable':
+                unavailable.add(path)
+            elif reason == 'nar-miss':
+                nar_misses.add(path)
+            if narinfo is None:
+                continue
+            if origin not in staged:
+                cache = Path(directory) / str(len(staged))
+                cache.mkdir()
+                (cache / 'nix-cache-info').write_text('StoreDir: /nix/store\n')
+                staged[origin] = (cache, key, [])
+            cache, _, paths = staged[origin]
+            (cache / (path.removeprefix('/nix/store/')[:32] + '.narinfo')).write_bytes(narinfo)
+            paths.append(path)
+        # Nix reads the exact wire bytes. Content addressing can bypass Nix's
+        # signature requirement, so conservatively retain CA records.
+        for cache, key, paths in staged.values():
+            reader = remote_env(env, directory)
+            reader['NIX_CONFIG'] += '\nsecret-key-files =\ntrusted-public-keys = ' + key + '\n'
+            for batch in batches(paths, METADATA_BATCH):
+                try:
+                    found = info(batch, reader, cache.as_uri(), deadline=deadline)
+                    matching = [path for path in batch if found.get(path) is not None
+                                and not found[path].get('ca')
+                                and metadata(found[path]) == metadata(entries[path])]
+                    if matching:
+                        verify_signatures(matching, cache.as_uri(), reader, deadline=deadline)
+                        served.update(matching)
+                except TimeoutError:
+                    overdue.update(batch)
+                except (CommandFailure, OSError, ValueError):
+                    # An unverified batch stays eligible for publication.
+                    continue
+    overdue.update(path for _, _, path in remaining)
+    limited = (overdue | cutoff) - served
+    if limited:
+        print(f'Public-cache probe deadline or origin cutoff reached; kept {len(limited)} paths.',
+              file=sys.stderr, flush=True)
+    failed = (unavailable | cutoff | overdue) - served
+    if failed:
+        print(f'Public-cache probing unavailable or incomplete; kept {len(failed)} paths.',
+              file=sys.stderr, flush=True)
+    nar_kept = nar_misses - served
+    if nar_kept:
+        print(f'Public NAR probe failed; kept {len(nar_kept)} paths.', file=sys.stderr, flush=True)
+    return served
+
+
 def completed_build_outputs(candidates, env):
     # Query only graph candidates in the local daemon. Invalid paths are null
     # in the pinned Nix JSON API; no graph output is realized or substituted.
-    candidates = sorted(candidates)
-    selected = []
-    for index in range(0, len(candidates), 128):
-        batch = candidates[index:index+128]
+    entries = {}
+    for batch in batches(candidates, 128):
         document = json.loads(run('nix', 'path-info', '--json',
                                   '--option', 'substituters', '', '--option', 'extra-substituters', '',
                                   *batch, env=env))
@@ -605,20 +1179,18 @@ def completed_build_outputs(candidates, env):
             document = {entry['path']: entry for entry in document if entry is not None}
         if not isinstance(document, dict) or set(document) - set(batch):
             raise ValueError('Invalid local output inventory')
-        for path, entry in sorted(document.items()):
+        for path, entry in document.items():
             if entry is None:
                 continue
             metadata(entry)
             signatures = entry.get('signatures', [])
             if not isinstance(signatures, list) or any(not isinstance(sig, str) for sig in signatures):
                 raise ValueError('Invalid output signatures')
-            # Keep the official-upstream signature convention: locally built or
-            # unsigned/custom-cache outputs need private publication. This is
-            # selection metadata, not an independent upstream cache proof.
-            if entry.get('ultimate') is not True and any(sig.startswith('cache.nixos.org-1:') for sig in signatures):
-                continue
-            selected.append(path)
-    return selected
+            entries[path] = entry
+    served = served_build_outputs(entries, env)
+    if served:
+        print(f'Public caches serve {len(served)} completed dependency outputs', file=sys.stderr, flush=True)
+    return sorted(entries.keys() - served)
 
 
 def build_with_dependencies(attr, rules, system, visibility, env, publish_env, outputs, label):
@@ -652,9 +1224,11 @@ def build(system):
     if rules.get('kind') == 'fleet':
         raise ValueError('Fleet releases require the existing exact-release verifier')
     sha = source()
+    PROGRESS.update(system=system, sha=sha)
+    progress('starting', force=True)
     # Writer/forge tokens never enter Nix evaluation or package build processes.
     env = {k: v for k, v in os.environ.items()
-           if k not in {'ATTIC_TOKEN', 'CHANNEL_TOKEN', 'SOURCE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'NIKS3_WRITE_TOKEN', 'NIKS3_AUTH_TOKEN_FILE', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL'}}
+           if k not in {'CHANNEL_TOKEN', 'SOURCE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'STATUS_TOKEN', 'NIKS3_WRITE_TOKEN', 'NIKS3_AUTH_TOKEN_FILE', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL'}}
     phase('check-native-platform')
     native_platform_ready(rules, system, env)
     targets = rules['targets'][system]
@@ -672,10 +1246,12 @@ def build(system):
     expected = {}
     with tempfile.TemporaryDirectory(prefix='channel-outputs-') as directory:
         phase('prepare-cache-publisher')
-        publish_env = dict(os.environ)
+        publish_env = {k: v for k, v in os.environ.items() if k != 'STATUS_TOKEN'}
         outputs = Path(directory) / 'outputs.txt'
         for index, target in enumerate(targets, 1):
             print(f'Processing inventory target {index}/{len(targets)}', flush=True)
+            progress(f'target {index}/{len(targets)} ' + target['attribute'].rsplit('.', 1)[-1],
+                     force=index in (1, len(targets)))
             attr = flake + '#' + target['attribute']
             phase('inspect-output-policy')
             if target['visibility'] == 'public':
@@ -712,10 +1288,18 @@ def build(system):
         # otherwise reuse a cached output. Missing checks are an empty set.
         phase('build-native-checks')
         checks = native_check_names(flake, system, env)
-        for name in checks:
+        if any(not re.fullmatch(r'[\w+-]+', name) for name in checks):
+            raise ValueError('Invalid check name')
+        check_outputs = native_check_outputs(flake, system, env)
+        if set(check_outputs) != set(checks):
+            raise ValueError('Native check inventory changed during evaluation')
+        distinct = distinct_checks(check_outputs, roots)
+        print(f'Building {len(distinct)} of {len(checks)} native checks; the other '
+              f'{len(checks) - len(distinct)} are inventory outputs already built and published', flush=True)
+        progress(f'checks 0/{len(distinct)} ({len(checks) - len(distinct)} are inventory outputs)', force=True)
+        for number, name in enumerate(distinct, 1):
             native_build_ready(rules, system, env)
-            if not re.fullmatch(r'[\w+-]+', name):
-                raise ValueError('Invalid check name')
+            progress(f'checks {number}/{len(distinct)} ' + name, force=number == len(distinct))
             check_attr = flake + '#checks.' + system + '.' + name
             check_visibility = 'cache-only' if all(t['visibility'] == 'cache-only' for t in targets) else 'public'
             if rules['forge'] == 'github':
@@ -737,16 +1321,21 @@ def build(system):
         phase('inspect-built-closure')
         if not roots or not expected or not set(roots) <= set(expected):
             raise ValueError('Missing built output closure')
-        phase('verify-remote-cache')
-        proof = verify(roots, expected, env)
+        phase('verify-published-metadata')
+        progress(f'verifying signed metadata for {len(expected)} closure paths', force=True)
+        proof = verify_published(roots, expected, env)
+        progress('pinning release closures', force=True)
+        manifest = pin_release(rules, system, roots, env, publish_env, directory)
         phase('record-release-proof')
         if source() != sha:
             raise ValueError('Source changed during release')
         receipt = digest({'commit': sha, 'policy': digest(rules), 'system': system, 'closure': proof})
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
-                stream.write('proof=' + receipt + '\n')
-        print('Required builds, checks, upload and independent cache reads passed for ' + system)
+                stream.write('proof=' + receipt + '\nretention=' + manifest + '\n')
+        print('Required builds, checks, upload and signed cache metadata passed for ' + system)
+        progress('passed: ' + str(len(targets)) + ' targets, ' + str(len(distinct)) + ' distinct checks, '
+                 + str(len(expected)) + ' signed closure paths', state='success')
 
 
 def git_env(directory):
@@ -762,12 +1351,17 @@ def git_env(directory):
                 GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
 
 
-def promote(channel, revision, proofs):
+def promote(channel, revision, proofs, retention=None):
     rules = policy()
     if channel not in {'tested', 'stable'} or not SHA.fullmatch(revision):
         raise ValueError('Invalid release selection')
     if set(proofs) != (set(rules['targets']) | set(rules.get('cacheOnlySystems', []))) or any(not re.fullmatch(r'[a-f0-9]{64}', p) for p in proofs.values()):
         raise ValueError('Missing required system proof')
+    # Retention manifests are recorded so later builds can keep this release
+    # pinned in Niks3 while it is advertised or in the recent recovery set.
+    retention = {k: v for k, v in (retention or {}).items() if v}
+    if not set(retention) <= set(proofs) or any(not isinstance(v, str) or not MANIFEST.fullmatch(v) for v in retention.values()):
+        raise ValueError('Invalid retention manifest')
     url = rules['remote']
     if url not in {'https://github.com/' + rules['repository'] + '.git',
                    'https://git.monke.fail/' + rules['repository'] + '.git'}:
@@ -787,8 +1381,11 @@ def promote(channel, revision, proofs):
         # Normal non-forced branch updates provide an ancestry/race check on the
         # server. Both immutable tag and channel move together or neither does.
         tag = channel + '-' + revision
-        message = json.dumps({'version': 1, 'commit': revision, 'policy': digest(rules),
-                              'proofs': proofs, 'activationAuthorized': False}, sort_keys=True)
+        record = {'version': 1, 'commit': revision, 'policy': digest(rules),
+                  'proofs': proofs, 'activationAuthorized': False}
+        if retention:
+            record['retention'] = retention
+        message = json.dumps(record, sort_keys=True)
         existing = run(*args, 'ls-remote', url, 'refs/tags/' + tag + '^{}', env=env)
         if existing:
             if existing.split()[0] != revision:
@@ -808,6 +1405,7 @@ def main():
     parser.add_argument('--channel', choices=['tested', 'stable'], default='tested')
     parser.add_argument('--revision')
     parser.add_argument('--proofs', default='{}')
+    parser.add_argument('--retention', default='{}')
     args = parser.parse_args()
     try:
         if args.action == 'daemon':
@@ -816,7 +1414,7 @@ def main():
             ensure_daemon()
             build(args.system)
         elif args.action == 'promote':
-            promote(args.channel, args.revision, json.loads(args.proofs))
+            promote(args.channel, args.revision, json.loads(args.proofs), json.loads(args.retention))
         elif args.action == 'retain':
             ensure_daemon()
             retain(args.system)
@@ -824,11 +1422,13 @@ def main():
             print(json.dumps(policy(), sort_keys=True))
     except CommandFailure as error:
         print('Release channel gate failed during ' + ACTIVE_PHASE + ': ' + str(error) + '; the previous channel is retained.', file=sys.stderr)
+        progress('failed during ' + ACTIVE_PHASE + ': ' + (error.category or 'command-failed'), state='failure')
         return 1
     except (ValueError, KeyError, OSError, RuntimeError, subprocess.SubprocessError) as error:
         kind = failure_category(str(error))
         if kind == 'command-failed': kind = 'validation-failed'
         print('Release channel gate failed during ' + ACTIVE_PHASE + ': ' + kind + '; the previous channel is retained.', file=sys.stderr)
+        progress('failed during ' + ACTIVE_PHASE + ': ' + kind, state='failure')
         return 1
     return 0
 

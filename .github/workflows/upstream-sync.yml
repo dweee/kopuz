@@ -16,9 +16,9 @@ jobs:
       contents: write
       actions: write
       checks: read
-    uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@74b21a2904ac5f6d6750f2f52f3a36f86b0b6651
+    uses: dweee/dave-fork-ci/.github/workflows/upstream-sync.yml@84e6e965fb4ec7b343cba352999d6660161ddba0
     with:
       tool-repository: dweee/dave-fork-ci
-      tool-revision: 74b21a2904ac5f6d6750f2f52f3a36f86b0b6651
-      auto-merge: ${{ vars.FORK_CI_AUTO_MERGE == 'true' && (vars.NIKS3_PUSH_ENABLED || vars.ATTIC_PUSH_ENABLED) == 'true' }}
+      tool-revision: 84e6e965fb4ec7b343cba352999d6660161ddba0
+      auto-merge: ${{ vars.FORK_CI_AUTO_MERGE == 'true' && vars.NIKS3_PUSH_ENABLED == 'true' }}
       cache: false

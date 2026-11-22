@@ -30,7 +30,8 @@ immutable source selections, but only this bounded recovery set is actively
 rechecked; cache uptime is still monitored separately.
 
 Every six hours, the updater resolves `tracking-inputs.json`, uses Nix to write
-the lock, pins Git sources exactly in flake.nix, evaluates, and opens a review PR.
+the lock, pins Git sources exactly in flake.nix, and evaluates. It updates one
+`automation/input-updates` branch and PR per repository in place.
 The manual-version monitor maintains one issue with candidates, failed checks,
 and unclassified files. Dynamic/unrecognized sources require manual review.
 This is monitoring, not blind rewriting of coordinated dependency hashes.
@@ -55,9 +56,9 @@ Required repository configuration:
   restricted to the trusted source branch. The updater requires Actions write.
 - Optional `UPDATE_TOKEN` is a repository-scoped app/PAT; default GITHUB_TOKEN
   PRs do not emit further pull_request workflow events.
-- A new update candidate supersedes older marked input-only PRs for the same
-  target branch after check dispatch succeeds. Branches are immutable and never
-  force-pushed; candidates containing source fixes are preserved for review.
+- The updater keeps the prior update head as a parent and pushes normally.
+  It gives pending checks time to finish and preserves any older proposal with
+  pins or source edits it cannot prove are included in the current candidate.
 - Optional `CHANNEL_TOKEN` can identify a separate protected-branch publisher.
 - Forgejo requires the existing native `nix` and native aarch64 Linux runners. Flakey
   and private inputs never go to GitHub. Already-public GitHub owning repos may

@@ -1,0 +1,82 @@
+mod actions;
+mod android;
+mod background;
+mod desktop;
+mod lyrics;
+mod metadata;
+mod tabs;
+mod video;
+
+use android::FullscreenAndroid;
+use background::use_fullscreen_background;
+use config::Settings;
+use desktop::FullscreenDesktop;
+use dioxus::prelude::*;
+use lyrics::use_fullscreen_lyrics;
+
+#[component]
+pub fn Fullscreen(
+    is_playing: Signal<bool>,
+    is_fullscreen: Signal<bool>,
+    current_song_duration: Signal<u64>,
+    current_song_progress: Signal<u64>,
+    queue: Signal<Vec<api::TrackInfo>>,
+    current_queue_index: Signal<usize>,
+    current_song_title: Signal<String>,
+    current_song_artist: Signal<String>,
+    current_song_bitrate: Signal<u16>,
+    current_song_album: Signal<String>,
+    volume: Signal<f32>,
+    palette: Signal<Option<Vec<utils::color::Color>>>,
+) -> Element {
+    if !*is_fullscreen.read() {
+        return rsx! { div {} };
+    }
+
+    let settings = use_context::<Signal<Settings>>();
+
+    let lyrics = use_fullscreen_lyrics();
+    let (background_style, cover_background) = use_fullscreen_background(palette);
+    let items = queue.read().clone();
+
+    if cfg!(target_os = "android") {
+        rsx! {
+            FullscreenAndroid {
+                is_playing,
+                is_fullscreen,
+                settings,
+                current_song_duration,
+                current_song_progress,
+                current_song_title,
+                current_song_artist,
+                current_song_album,
+                current_song_bitrate,
+                current_queue_index,
+                items,
+                lyrics,
+                background_style,
+                cover_background,
+            }
+        }
+    } else {
+        rsx! {
+            FullscreenDesktop {
+                is_playing,
+                is_fullscreen,
+                settings,
+                current_song_duration,
+                current_song_progress,
+                current_song_title,
+                current_song_artist,
+                current_song_album,
+                current_song_bitrate,
+                current_queue_index,
+                items,
+                lyrics,
+                volume,
+                background_style,
+                cover_background,
+            }
+        }
+    }
+}

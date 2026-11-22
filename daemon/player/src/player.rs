@@ -1,0 +1,444 @@
+//! Public playback handle.
+//!
+//! `Player` is a thin façade over the engine actor (`crate::engine`): methods
+//! send serialized commands; reads come from the actor's lock-free
+//! `EngineStatus` snapshot. No audio state lives on the caller's thread.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use config::{ChannelMode, EqualizerSettings, ReplayGainInfo, ReplayGainSettings};
+
+use crate::engine::{
+    ActorMsg, AudioSink, Command, CpalSink, EngineHandle, EngineStatus, Event, LoadReply,
+    LoadRequest, Phase, SinkEvent, SourceFactory, Transition,
+};
+#[cfg(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "android"
+))]
+use crate::systemint;
+
+pub struct NowPlayingMeta {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: Duration,
+    pub artwork: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum PlayerInitError {
+    NoOutputDevice,
+    OutputStream(cpal::Error),
+    EngineThread(std::io::Error),
+}
+
+impl std::fmt::Display for PlayerInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoOutputDevice => f.write_str("no output device available"),
+            Self::OutputStream(e) => write!(f, "output stream error: {e}"),
+            Self::EngineThread(e) => write!(f, "failed to spawn player engine thread: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PlayerInitError {}
+
+/// Everything the engine needs to start playing a new source.
+pub struct LoadArgs {
+    /// Caller-chosen monotonic token; every engine event and the reply are
+    /// correlated to it (the controller uses its play generation).
+    pub token: u64,
+    pub factory: SourceFactory,
+    pub meta: NowPlayingMeta,
+    pub transition: Transition,
+    pub start_at: Option<Duration>,
+    /// The queue is walking an album; see [`LoadRequest::album_context`].
+    pub album_context: bool,
+    /// See [`LoadRequest::service_replay_gain`].
+    pub service_replay_gain: ReplayGainInfo,
+    /// Resolves once the source is playing or failed; dropped on cancellation.
+    pub reply: Option<LoadReply>,
+}
+
+pub struct Player {
+    engine: EngineHandle,
+    now_playing: Option<NowPlayingMeta>,
+    metadata_token: Option<u64>,
+    incoming: Option<(u64, NowPlayingMeta)>,
+}
+
+impl Player {
+    fn from_engine(engine: EngineHandle) -> Self {
+        Self {
+            engine,
+            now_playing: None,
+            metadata_token: None,
+            incoming: None,
+        }
+    }
+
+    pub fn try_new() -> Result<Self, PlayerInitError> {
+        // Android initialises the JNI media session + classloader cache here; the desktop
+        // platforms set up their system integration from the app entry point instead.
+        #[cfg(target_os = "android")]
+        systemint::init();
+
+        let engine = EngineHandle::spawn(|tx| {
+            let tx = tx.clone();
+            CpalSink::try_new(move |event| {
+                let msg = match event {
+                    SinkEvent::DeviceLost => ActorMsg::DeviceError { device_lost: true },
+                    SinkEvent::StreamStalled => ActorMsg::DeviceError { device_lost: false },
+                    SinkEvent::DefaultDeviceChanged => ActorMsg::DefaultDeviceChanged,
+                };
+                let _ = tx.send(msg);
+            })
+            .map(|sink| Box::new(sink) as Box<dyn AudioSink>)
+        })?;
+
+        Ok(Self::from_engine(engine))
+    }
+
+    /// Start a player around an injected sink. Daemon and engine tests use
+    /// this to run the real actor/decoder state machine without requiring an
+    /// output device.
+    pub fn try_with_sink(sink: Box<dyn AudioSink>) -> Result<Self, PlayerInitError> {
+        EngineHandle::spawn(move |_| Ok(sink)).map(Self::from_engine)
+    }
+
+    pub fn new() -> Self {
+        Self::try_new().expect("failed to initialize audio player")
+    }
+
+    /// Subscribe to the engine's event stream. Multiple subscribers are
+    /// supported — each receives every event; a subscriber whose receiver is
+    /// dropped is pruned on the next emit.
+    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.engine.send(Command::Subscribe(tx));
+        rx
+    }
+
+    /// Start loading a new source. Fire-and-forget: the source is built and
+    /// probed on an engine worker thread; completion arrives through
+    /// `args.reply` and the event stream. The OS now-playing display switches
+    /// immediately, consistent with the UI hydrating before the load resolves.
+    #[tracing::instrument(name = "player.load", skip_all, fields(title = %args.meta.title))]
+    pub fn load(&mut self, args: LoadArgs) {
+        let LoadArgs {
+            token,
+            factory,
+            meta,
+            transition,
+            start_at,
+            album_context,
+            service_replay_gain,
+            reply,
+        } = args;
+        self.engine.send(Command::Load(LoadRequest {
+            token,
+            factory,
+            duration: meta.duration,
+            transition,
+            start_at,
+            album_context,
+            service_replay_gain,
+            reply,
+        }));
+        // Push the OS now-playing display now only for an immediate switch (the
+        // UI hydrates to the new track at the same time). A crossfade or gapless
+        // switch keeps showing the outgoing track until the engine switches, so
+        // its metadata is pushed then, via `commit_now_playing`.
+        if matches!(transition, Transition::Immediate) {
+            self.now_playing = Some(meta);
+            self.metadata_token = Some(token);
+            self.incoming = None;
+            self.push_now_playing(start_at.unwrap_or(Duration::ZERO), true);
+        } else {
+            self.incoming = Some((token, meta));
+        }
+    }
+
+    pub fn commit_now_playing(&mut self, token: u64) {
+        if let Some((_, meta)) = self.incoming.take_if(|(incoming, _)| *incoming == token) {
+            self.now_playing = Some(meta);
+            self.metadata_token = Some(token);
+        }
+        self.update_now_playing_system();
+    }
+
+    /// Drop a load that is still resolving without touching live playback.
+    pub fn cancel_pending_load(&self) {
+        self.engine.send(Command::CancelPending);
+    }
+
+    pub fn pause(&self) {
+        self.engine.send(Command::Pause);
+        self.push_now_playing(self.get_position(), false);
+    }
+
+    pub fn play_resume(&self) {
+        self.engine.send(Command::Resume);
+        self.push_now_playing(self.get_position(), true);
+    }
+
+    pub fn seek(&self, time: Duration) {
+        // Mirror the engine's end-guard clamp so the system position display
+        // matches what will actually play.
+        const END_GUARD: Duration = Duration::from_millis(2000);
+        let time = if let Some(meta) = &self.now_playing {
+            if meta.duration > END_GUARD {
+                time.min(meta.duration - END_GUARD)
+            } else {
+                Duration::ZERO
+            }
+        } else {
+            time
+        };
+
+        self.engine.send(Command::Seek {
+            position: time,
+            token: None,
+        });
+        self.push_now_playing(time, !self.is_paused());
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.status().paused
+    }
+
+    pub fn can_resume(&self) -> bool {
+        matches!(self.status().phase, Phase::Playing | Phase::Paused)
+    }
+
+    pub fn stop(&mut self) {
+        self.engine.send(Command::Stop { pause_device: true });
+        self.now_playing = None;
+        self.metadata_token = None;
+        self.incoming = None;
+        // Tear down the Android foreground service + media notification so the OS can
+        // reclaim the process; otherwise the dismissed-notification state lingers.
+        #[cfg(target_os = "android")]
+        systemint::stop_session();
+    }
+
+    pub fn stop_for_transition(&self) {
+        self.engine.send(Command::Stop {
+            pause_device: false,
+        });
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.engine.send(Command::SetVolume(volume));
+    }
+
+    pub fn set_channel_mode(&self, mode: ChannelMode) {
+        self.engine.send(Command::SetChannelMode(mode));
+    }
+
+    pub fn set_equalizer(&self, settings: EqualizerSettings) {
+        self.engine.send(Command::SetEqualizer(settings));
+    }
+
+    /// Takes effect on the playing track too, not just the next one.
+    pub fn set_replay_gain(&self, settings: ReplayGainSettings) {
+        self.engine.send(Command::SetReplayGain(settings));
+    }
+
+    /// Refresh the queue context without reloading a playing or probing track.
+    pub fn set_album_context(&self, token: u64, album_context: bool) {
+        self.engine.send(Command::SetAlbumContext {
+            token,
+            album_context,
+        });
+    }
+
+    /// Whether playback keeps going or holds paused after migrating to a new
+    /// output device.
+    pub fn set_device_change_behavior(&self, behavior: config::DeviceChangeBehavior) {
+        self.engine.send(Command::SetDeviceChangeBehavior(behavior));
+    }
+
+    /// Whether the output stream follows the device's default sample rate
+    /// (resampling every source) or reopens at each track's native rate.
+    pub fn set_sample_rate_mode(&self, mode: config::SampleRateMode) {
+        self.engine.send(Command::SetSampleRateMode(mode));
+    }
+
+    pub fn update_metadata(&mut self, token: u64, meta: NowPlayingMeta) {
+        if let Some((_, incoming)) = self
+            .incoming
+            .as_mut()
+            .filter(|(incoming, _)| *incoming == token)
+        {
+            *incoming = meta;
+            return;
+        }
+        if self.metadata_token != Some(token) {
+            return;
+        }
+        // Artwork can arrive after the engine switches, so keep its duration untouched.
+        self.now_playing = Some(meta);
+        self.update_now_playing_system();
+    }
+
+    /// Update stored artwork; `commit_now_playing` publishes it when the track is visible.
+    pub fn set_artwork(&mut self, token: u64, artwork: Option<String>) -> bool {
+        if let Some((_, meta)) = self
+            .incoming
+            .as_mut()
+            .filter(|(incoming, _)| *incoming == token)
+        {
+            meta.artwork = artwork;
+            return true;
+        }
+        if self.metadata_token != Some(token) {
+            return false;
+        }
+        if let Some(meta) = &mut self.now_playing {
+            meta.artwork = artwork;
+            return true;
+        }
+        false
+    }
+
+    pub fn get_position(&self) -> Duration {
+        self.status().position()
+    }
+
+    /// How far the position clock runs ahead of the speakers.
+    pub fn output_latency(&self) -> Duration {
+        self.status().output_latency()
+    }
+
+    /// The outgoing (fading) session's live position during a crossfade, if one
+    /// is in progress. Lets the UI show the track it is still displaying.
+    pub fn fading_position(&self) -> Option<Duration> {
+        self.status().fading_position()
+    }
+
+    /// The engine's current session token (the last session's if idle).
+    pub fn session_token(&self) -> u64 {
+        self.status().token
+    }
+
+    /// Engine sessions whose audio is current, including both sides of an
+    /// actual crossfade. A pending/queued next session is deliberately absent.
+    pub fn audible_sessions(&self) -> (Option<u64>, Option<u64>, bool) {
+        let status = self.status();
+        let loaded = matches!(status.phase, Phase::Playing | Phase::Paused);
+        (
+            loaded.then_some(status.token),
+            status.fading.as_ref().filter(|_| loaded).map(|f| f.token),
+            loaded && !status.paused,
+        )
+    }
+
+    /// Seek a specific session; the engine ignores it if a completed crossfade
+    /// has since promoted a different one.
+    pub fn seek_for_session(&self, time: Duration, token: u64) {
+        self.engine.send(Command::Seek {
+            position: time,
+            token: Some(token),
+        });
+        self.push_now_playing(time, !self.is_paused());
+    }
+
+    fn status(&self) -> Arc<EngineStatus> {
+        self.engine.status()
+    }
+
+    fn update_now_playing_system(&self) {
+        self.push_now_playing(self.get_position(), !self.is_paused());
+    }
+
+    /// Position/playing are passed explicitly: right after a command the status
+    /// snapshot may not reflect it yet, and the OS display should show intent.
+    fn push_now_playing(&self, position: Duration, playing: bool) {
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android"
+        ))]
+        if let Some(meta) = &self.now_playing {
+            systemint::update_now_playing(
+                &meta.title,
+                &meta.artist,
+                &meta.album,
+                meta.duration.as_secs_f64(),
+                position.as_secs_f64(),
+                playing,
+                meta.artwork.as_deref(),
+            );
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android"
+        )))]
+        let _ = (position, playing);
+    }
+}
+
+impl Default for Player {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delayed_artwork_only_updates_the_metadata_owned_by_its_load() {
+        let mut player = Player::try_with_sink(Box::new(crate::engine::NullSink::new())).unwrap();
+        let load = |token| LoadArgs {
+            token,
+            factory: Box::new(|| Err(std::io::Error::other("no audio needed"))),
+            meta: NowPlayingMeta {
+                title: format!("Track {token}"),
+                artist: String::new(),
+                album: String::new(),
+                duration: Duration::from_secs(60),
+                artwork: None,
+            },
+            transition: Transition::Crossfade(Duration::from_secs(2)),
+            start_at: None,
+            album_context: false,
+            service_replay_gain: ReplayGainInfo::default(),
+            reply: None,
+        };
+        let mut first = load(1);
+        first.transition = Transition::Immediate;
+        player.load(first);
+        assert!(!player.set_artwork(2, Some("/cache/incoming.jpg".into())));
+        assert!(player.now_playing.as_ref().unwrap().artwork.is_none());
+        player.load(load(2));
+        assert!(player.set_artwork(2, Some("/cache/incoming.jpg".into())));
+        assert!(player.set_artwork(1, Some("/cache/outgoing.jpg".into())));
+        for (token, artwork) in [(1, "/cache/outgoing.jpg"), (2, "/cache/incoming.jpg")] {
+            let mut fetched = load(token).meta;
+            fetched.artwork = Some(artwork.into());
+            player.update_metadata(token, fetched);
+        }
+        let outgoing = player.now_playing.as_ref().unwrap();
+        assert_eq!(outgoing.title, "Track 1");
+        assert_eq!(outgoing.artwork.as_deref(), Some("/cache/outgoing.jpg"));
+        player.commit_now_playing(2);
+        assert!(!player.set_artwork(1, Some("/cache/stale.jpg".into())));
+        player.update_metadata(1, load(1).meta);
+        let current = player.now_playing.as_ref().unwrap();
+        assert_eq!(current.title, "Track 2");
+        assert_eq!(current.artwork.as_deref(), Some("/cache/incoming.jpg"));
+        player.stop();
+        assert!(!player.set_artwork(2, Some("/cache/incoming.jpg".into())));
+    }
+}

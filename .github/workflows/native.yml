@@ -55,7 +55,8 @@ jobs:
       env:
         CARGO_BUILD_JOBS: '3'
       run: |
-        nix develop --no-update-lock-file --no-write-lock-file --command bash -euc '
+        python3 ci/test-nix-dev-shell.py
+        nix develop --no-update-lock-file --no-write-lock-file --command python3 ci/nix-dev-shell.py bash -euc '
           gitleaks git --redact --no-banner --log-opts=552400339461ef09c09d4db133bf356ea8fead18..HEAD .
           python3 ci/test-gitleaks-config.py
           cargo fmt --all -- --check

@@ -2,11 +2,13 @@
 
 Kopuz's playback core is a daemon. Every feature the built-in GUI has goes
 through the gRPC surface described here. The contract is one file:
-`crates/proto/proto/kopuz.proto` (package `kopuz.v1`).
+`shared/proto/proto/kopuz.proto` (package `kopuz.v1`).
 
-This is a local IPC channel between the daemon and a frontend on the same
-machine. It is never exposed to a network, and it is not a stable public
-API -- the schema changes with the app, in the same commit.
+By default this is a local IPC channel between the daemon and a frontend on
+the same machine. `--listen` also serves it over plain TCP on the address you
+give, with no authentication, so expose that port only where you trust every
+client. It is not a stable public API -- the schema changes with the app, in
+the same commit.
 
 ## Running the daemon
 
@@ -23,7 +25,7 @@ Two deployment shapes serve the same API:
   the app itself.
 
 `kopuzd` flags: `--socket <path>`, `--listen <ip>:<port>`,
-`--token-file <path>`, `--db-path <file>`.
+`--db-path <file>`.
 
 Exclusive ownership is enforced with a lock file beside the database, so a
 second process pointed at the same library fails to start with a readable
@@ -71,30 +73,22 @@ grpcurl -unix -plaintext $SOCK kopuz.v1.Kopuz/GetPlayerState
 
 `kopuzd --listen <ip>:<port>` serves the same API as plain HTTP/2 on a port
 as well, for clients that cannot open a socket: another machine, a browser
-bridge, a language whose gRPC stack has no Unix socket support. A port has
-no owner the kernel can check, so this transport is the one place a secret
-comes back: every call must carry `authorization: Bearer <token>`, or it is
-refused with `UNAUTHENTICATED` before it reaches a service. The token is
-minted on first use and kept, `0600`, in the token file (`kopuzd.token`
-beside the socket by default; `--token-file` moves it). Binding beyond
-loopback is allowed and logged with a warning: the token is then the only
-thing between the network and the library, and the wire is not encrypted.
+bridge, a language whose gRPC stack has no Unix socket support. Like the
+socket, it carries no credentials: anyone who can reach the port can drive
+the daemon, and the wire is not encrypted. It binds whatever address it is
+given, so choosing one beyond loopback is a decision about who may connect.
 
 ```sh
 kopuzd --listen 127.0.0.1:7770
-TOKEN=$(cat $XDG_RUNTIME_DIR/kopuz/kopuzd.token)
-grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
-  127.0.0.1:7770 kopuz.v1.Kopuz/GetPlayerState
+grpcurl -plaintext 127.0.0.1:7770 kopuz.v1.Kopuz/GetPlayerState
 ```
 
-The Rust client dials it with `client::GrpcApi::connect_tcp(address, token)`
-and presents the token on every call, the event stream included.
+The Rust client dials it with `client::GrpcApi::connect_tcp(address)`.
 
 ## Errors
 
-RPC failures are gRPC statuses, and the status code is the whole story —
-localize by it, never by the message. The mapping is one-to-one, so
-nothing rides alongside it in metadata:
+RPC failures are gRPC statuses. Localize by the status code, never by the
+message; the mapping is one-to-one:
 
 | gRPC code | `ErrorCode` | meaning |
 |---|---|---|
@@ -116,6 +110,13 @@ never sent -- the daemon cannot report its own absence.
 The `ErrorCode` enum in the schema is for failures
 reported *inside* a message, where there is no status to carry them, such
 as `JobStatus.error`. Treat an unrecognized status code as `internal`.
+
+A failure a person can act on, such as a pinned setting or an integration
+sign-in that was not approved in time, also carries an `ErrorReason`: in
+the status details as an encoded `ErrorDetail`, and in `ErrorBody.reason`.
+Say the reason in the client's own language where there is one. The
+message is English and meant for logs; show it only for a reason the
+client does not know, or none.
 
 ## Events and playback
 
@@ -217,11 +218,14 @@ A job kind is single-flight: a second start returns ALREADY_EXISTS.
 Sources and integrations: `GetSources`, `SelectSource`, `UpsertServer`,
 `DeleteServer`, `UpsertLocalSource`, `DeleteLocalSource`,
 `SetSourceDirectories`, `ProvisionCredentials`, `LoginSource`,
-`ClearCredentials`, `AuthenticateSource`, `BrowseSource`, `ValidateSource`,
+`ClearCredentials`, `AuthenticateSource`, `GetBrowserSessions` /
+`ImportBrowserSession` (take a session from a signed-in browser profile on
+the daemon's machine), `BrowseSource`, `ValidateSource`,
 `CanOpenBrowser`, and `GetIntegrations` / `ProvisionIntegration` /
 `ClearIntegration` / `AuthenticateIntegration` for the scrobblers.
 
-Settings: `GetConfig`, `SetConfig`, `PreviewEqualizer` (heard, not kept).
+Settings: `GetConfig`, `EditConfig`, `PreviewEqualizer` and `PreviewReplayGain`
+(heard, not kept).
 
 Artwork: `GetArtwork {target, hq}` streams `ArtworkChunk`, the first
 carrying `content_type`.
@@ -320,16 +324,18 @@ message, not JSON in a string: the settings are a closed Rust struct on both
 ends of one binary, so the schema says so and a wrong key or type fails to
 compile rather than at runtime.
 
-Two groups of fields never cross: credentials (media-server logins, Last.fm
-and Libre.fm keys, the MusicBrainz token) and machine-local path state
-(`offline_tracks`). They come back as defaults in the view, and `SetConfig`
-ignores whatever you send for them -- the daemon keeps its own -- so reading
-a view and writing it straight back cannot erase them.
+Credentials (media-server logins, Last.fm and Libre.fm keys, the MusicBrainz
+token) and machine-local path state (`offline_tracks`) are not settings and
+never cross.
 
-`SetConfig` replaces the surface wholesale rather than patching: read the
-view, change what you want, send it back. The daemon diffs it against what
-it holds and reports only the keys that actually changed in
-`config.changed`. `locked_keys` are pinned by a managed settings layer -- a
-read-only or Nix-store `settings.toml`, a `settings.d` drop-in, or a
-`KOPUZ_CONFIG_*` override -- and changing one is refused; leaving it at the
-value you read is not, so a read-modify-write of any other key still works.
+`EditConfig` takes a list of `ConfigEdit`s, each a single typed change to one
+setting; a collection changes one member at a time (`custom_themes` puts or
+deletes one theme, `radio_registries` puts or removes one registry). Each edit gets its own `EditOutcome`, in order:
+applied, locked (a managed settings layer pins the key -- a read-only or
+Nix-store `settings.toml`, a `settings.d` drop-in, or a `KOPUZ_CONFIG_*`
+override), or invalid (the value breaks a rule, or the daemon owns the key
+and the reason names the API that sets it). A refused edit never refuses the
+rest, and a key no edit names stays as the daemon holds it, so a client with
+an old view cannot roll back another's change. The report carries the view
+after the batch; `config_changed` carries only the new revision, and
+`ConfigView.locked` lists the pinned keys.

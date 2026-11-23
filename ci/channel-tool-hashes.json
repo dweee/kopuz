@@ -14,6 +14,6 @@
   "install-niks3.sh": "51b65bd086f5bedab838f6d231783759b7a0daaf9671194a13502877de235e81",
   "retain-build-outputs.py": "9ed1ea197bd63a137ff36a1dc30aaa1c44c0664f9bc96fd219442ce11b176b11",
   "test-retain-build-outputs.py": "d79d25039859eea23bd25c81fe61086d6b4d3a374fdb441b41fef1359320071f",
-  "transfer-closures.py": "3c174d7dc785b5d43a93e220db74eb68f1e36da7cbe909d9aee61c708778f161",
-  "test-transfer-closures.py": "041b95a73ba7db58b4a32d3c5fd30f0010a147e1ab8e1dd08b84e6d9b75c0712"
+  "transfer-closures.py": "ef9c138eba4ef5292b4ec962f22e9115aa64faa958821e89eb0258e980b0b01e",
+  "test-transfer-closures.py": "7fc0d47f4d191b5e418741f72c416b71c87b2d61fc5a35926fa12bd831f32a4f"
 }

@@ -107,8 +107,10 @@ def main():
     args = parser.parse_args()
     try:
         mib = int(os.environ.get("MAX_CLOSURE_MIB") or "2048")
-        if not 1 <= mib <= 8192:
-            raise ValueError("Closure transfer limit must be between 1 and 8192 MiB")
+        # Large Flutter and Swift graphs (yaas, rea) set sixteen GiB explicitly.
+        if not 1 <= mib <= 16384:
+            print("MAX_CLOSURE_MIB must be between 1 and 16384; no cache publication is authorized.", file=sys.stderr)
+            return 1
         if args.manifest is not None:
             if args.mode != 'export':
                 raise ValueError('Only export selects a source manifest')

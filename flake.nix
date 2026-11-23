@@ -1,6 +1,6 @@
 {
   description = "Kopuz with native Qobuz support";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/66e35b8af98e79f3d4a0405f32344724918bf9ff";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/c40f3fa4eb374e1d5ee89ffe8a72ba531397d257";
   # A flake input, not fetchFromGitHub + import: evaluation must not need a
   # build, or the release gate's no-build retained-root evaluation fails.
   inputs.crane.url = "github:ipetkov/crane/95e62def851e9d650f0eab63cb4f59a3306e20bd";

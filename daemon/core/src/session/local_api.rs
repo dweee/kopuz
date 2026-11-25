@@ -298,6 +298,52 @@ impl api::PlaylistApi for LocalApi {
             .await
     }
 
+    async fn import_external_playlist(
+        &self,
+        source: api::ExternalPlaylist,
+    ) -> Result<api::PlaylistImport, ApiError> {
+        use futures_util::StreamExt as _;
+        let list = crate::playlist_import::read(source).await?;
+        let library = self.library()?;
+        let found: Vec<(crate::playlist_import::Song, Option<String>)> =
+            futures_util::stream::iter(list.songs)
+                .map(|song| async move {
+                    let query = format!("{} {}", song.artist, song.title);
+                    let key = match library.search(&query).await {
+                        Ok(results) => crate::playlist_import::pick(&results.tracks, &song),
+                        Err(error) => {
+                            tracing::debug!(%error, "no search answer for an imported song");
+                            None
+                        }
+                    };
+                    (song, key)
+                })
+                .buffered(4)
+                .collect()
+                .await;
+        let missing: Vec<String> = found
+            .iter()
+            .filter(|(_, key)| key.is_none())
+            .map(|(song, _)| format!("{} - {}", song.artist, song.title))
+            .collect();
+        let keys: Vec<String> = found.into_iter().filter_map(|(_, key)| key).collect();
+        if keys.is_empty() {
+            return Err(ApiError::not_found(
+                "none of the playlist's songs could be found",
+            ));
+        }
+        let matched = u32::try_from(keys.len()).unwrap_or(u32::MAX);
+        let (name, keys) = (&list.name, &keys);
+        let id = self
+            .recovering(|| async move { self.playlists()?.create(name, keys).await })
+            .await?;
+        Ok(api::PlaylistImport {
+            id,
+            matched,
+            missing,
+        })
+    }
+
     async fn rename_playlist(&self, id: String, name: String) -> Result<(), ApiError> {
         let (id, name) = (&id, &name);
         self.recovering(|| async move { self.playlists()?.rename(id, name).await })
@@ -721,6 +767,14 @@ impl api::LibraryApi for LocalApi {
             Some(library) => library.lyrics(&key).await,
             None => Err(ApiError::unsupported("no library service")),
         }
+    }
+
+    async fn similar_artists(&self, name: String) -> Result<Vec<api::SimilarArtist>, ApiError> {
+        self.library()?.similar_artists(&name).await
+    }
+
+    async fn listening_stats(&self, days: Option<u32>) -> Result<api::ListeningStats, ApiError> {
+        self.library()?.listening_stats(days).await
     }
 
     async fn stats(&self) -> Result<api::StatsView, ApiError> {
@@ -1150,7 +1204,11 @@ impl api::SourceApi for LocalApi {
     }
 
     async fn accounts(&self, id: String) -> Result<Vec<api::SourceAccount>, ApiError> {
-        self.sources()?.accounts(&id).await
+        let sources = self.sources()?;
+        let id = id.as_str();
+        sources
+            .recovering_for(id, || async move { sources.accounts(id).await })
+            .await
     }
 
     async fn switch_account(

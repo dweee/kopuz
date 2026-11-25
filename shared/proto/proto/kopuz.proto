@@ -27,6 +27,7 @@ service Kopuz {
   rpc Seek(Seek) returns (MutationResult);
   rpc SetVolume(SetVolume) returns (MutationResult);
   rpc SetMuted(SetMuted) returns (MutationResult);
+  rpc SetSpeed(SetSpeed) returns (MutationResult);
   rpc SetMode(SetMode) returns (MutationResult);
   rpc SetVersion(SetVersion) returns (MutationResult);
 
@@ -47,6 +48,7 @@ service Kopuz {
   rpc GetArtists(ArtistsRequest) returns (ArtistPage);
   rpc GetArtistTracks(ArtistTracksRequest) returns (TrackPage);
   rpc GetArtist(ArtistRequest) returns (ArtistDetail);
+  rpc GetSimilarArtists(SimilarArtistsRequest) returns (SimilarArtists);
   rpc GetArtistSampleTracks(Page) returns (TrackPage);
   rpc GetGenres(GetGenresRequest) returns (GenreList);
   rpc GetTopGenre(GetTopGenreRequest) returns (TopGenreResponse);
@@ -71,6 +73,7 @@ service Kopuz {
   rpc GetPlaylists(GetPlaylistsRequest) returns (PlaylistCatalog);
   rpc CreatePlaylist(CreatePlaylistRequest) returns (PlaylistId);
   rpc ImportPlaylist(ImportPlaylistRequest) returns (PlaylistImport);
+  rpc ImportExternalPlaylist(ImportExternalPlaylistRequest) returns (PlaylistImport);
   rpc RenamePlaylist(RenamePlaylistRequest) returns (Unit);
   rpc DeletePlaylist(PlaylistId) returns (Unit);
   rpc AddPlaylistTracks(AddPlaylistTracksRequest) returns (Unit);
@@ -82,6 +85,7 @@ service Kopuz {
   rpc DeletePlaylistFolder(PlaylistFolderId) returns (Unit);
   rpc MovePlaylist(MovePlaylistRequest) returns (Unit);
   rpc GetStats(GetStatsRequest) returns (Stats);
+  rpc GetListeningStats(ListeningStatsRequest) returns (ListeningStats);
   rpc GetLyrics(TrackRef) returns (Lyrics);
   rpc GetFavorites(GetFavoritesRequest) returns (Favorites);
   rpc GetJobs(GetJobsRequest) returns (JobList);
@@ -216,6 +220,11 @@ message EventEnvelope {
 
 message Seek {
   uint64 position_ms = 1;
+}
+
+message SetSpeed {
+  // 0.5 to 2.0; the pitch moves with it.
+  float speed = 1;
 }
 
 message SetVolume {
@@ -413,6 +422,8 @@ message PlayerState {
   optional TrackInfo row = 14;
   // Output is silenced; `volume` is still the level unmuting returns to.
   bool muted = 15;
+  // Playback speed; 0 means normal, for daemons that predate it.
+  float speed = 16;
 }
 
 // phase is engine truth; intent is what the daemon is trying to do.
@@ -1622,6 +1633,19 @@ message CreatePlaylistRequest {
   repeated string keys = 2;
 }
 
+message ImportExternalPlaylistRequest {
+  oneof source {
+    // A public Spotify playlist or album link.
+    string link = 1;
+    CsvPlaylist csv = 2;
+  }
+}
+
+message CsvPlaylist {
+  string name = 1;
+  string text = 2;
+}
+
 message ImportPlaylistRequest {
   string name = 1;
   // The M3U file's text.
@@ -1964,6 +1988,7 @@ message ConfigEdit {
     SampleRateMode sample_rate_mode = 47;
     OptionalString output_device = 90;
     bool exclusive_output = 91;
+    bool prefer_word_synced_lyrics = 92;
     StreamQuality stream_quality = 72;
     bool autoplay_radio = 73;
     bool skip_explicit = 74;
@@ -1986,7 +2011,6 @@ message ConfigEdit {
     uint32 cover_art_blur = 30;
     string custom_background_path = 31;
     bool prefer_local_lyrics = 63;
-    bool enable_musixmatch_lyrics = 64;
     bool romanize_lyrics = 89;
     int32 lyrics_offset_ms = 65;
     bool lyrics_offset_auto = 66;
@@ -2014,6 +2038,7 @@ message ConfigEdit {
     uint64 offline_cache_max_bytes = 85;
     string listen_address = 86;
   }
+  reserved 64; // was enable_musixmatch_lyrics: Musixmatch was dropped
 }
 
 // One member of custom_themes, by the name it is stored under.
@@ -2114,7 +2139,7 @@ enum SettingKey {
   SETTING_KEY_COVER_FETCH_STRATEGY = 60;
   SETTING_KEY_RADIO_REGISTRIES = 61;
   SETTING_KEY_PREFER_LOCAL_LYRICS = 63;
-  SETTING_KEY_ENABLE_MUSIXMATCH_LYRICS = 64;
+  reserved 64; // was SETTING_KEY_ENABLE_MUSIXMATCH_LYRICS: Musixmatch was dropped
   SETTING_KEY_ROMANIZE_LYRICS = 89;
   SETTING_KEY_LYRICS_OFFSET_MS = 65;
   SETTING_KEY_LYRICS_OFFSET_AUTO = 66;
@@ -2141,6 +2166,7 @@ enum SettingKey {
   SETTING_KEY_DISCORD_PRESENCE_LISTEN_BUTTON = 88;
   SETTING_KEY_OUTPUT_DEVICE = 90;
   SETTING_KEY_EXCLUSIVE_OUTPUT = 91;
+  SETTING_KEY_PREFER_WORD_SYNCED_LYRICS = 92;
 }
 
 message GetFrontendPrefsRequest {
@@ -2320,7 +2346,7 @@ message Config {
   FetchStrategy cover_fetch_strategy = 60;
   repeated RegistryEntry radio_registries = 61;
   bool prefer_local_lyrics = 63;
-  bool enable_musixmatch_lyrics = 64;
+  reserved 64; // was enable_musixmatch_lyrics: Musixmatch was dropped
   bool romanize_lyrics = 89;
   int32 lyrics_offset_ms = 65;
   bool lyrics_offset_auto = 66;
@@ -2351,6 +2377,7 @@ message Config {
   // Absent means the system default output.
   optional string output_device = 90;
   bool exclusive_output = 91;
+  bool prefer_word_synced_lyrics = 92;
 }
 
 message DownloaderOptions {
@@ -2718,4 +2745,49 @@ message TrackUploadChunk {
 message RipAudioRequest {
   repeated string keys = 1;
   string output_dir = 2;
+}
+
+message ListeningStatsRequest {
+  optional uint32 days = 1;
+}
+
+message RankedTrack {
+  string key = 1;
+  string title = 2;
+  string artist = 3;
+  uint32 plays = 4;
+}
+
+message Ranked {
+  string name = 1;
+  string detail = 2;
+  uint32 plays = 3;
+}
+
+message DayPlays {
+  int64 day = 1;
+  uint32 plays = 2;
+}
+
+message ListeningStats {
+  uint32 plays = 1;
+  uint64 seconds = 2;
+  repeated RankedTrack tracks = 3;
+  repeated Ranked artists = 4;
+  repeated Ranked albums = 5;
+  repeated DayPlays days = 6;
+}
+
+message SimilarArtistsRequest {
+  string name = 1;
+}
+
+message SimilarArtist {
+  string name = 1;
+  // Set when the library has this artist.
+  optional string key = 2;
+}
+
+message SimilarArtists {
+  repeated SimilarArtist artists = 1;
 }

@@ -217,6 +217,43 @@ pub struct StatsView {
     pub listen_counts: std::collections::HashMap<String, u64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SimilarArtist {
+    pub name: String,
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListeningStats {
+    pub plays: u32,
+    pub seconds: u64,
+    pub tracks: Vec<RankedTrack>,
+    pub artists: Vec<Ranked>,
+    pub albums: Vec<Ranked>,
+    pub days: Vec<DayPlays>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RankedTrack {
+    pub key: String,
+    pub title: String,
+    pub artist: String,
+    pub plays: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ranked {
+    pub name: String,
+    pub detail: String,
+    pub plays: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DayPlays {
+    pub day: i64,
+    pub plays: u32,
+}
+
 /// A window into a filtered track listing. `total` always reflects the whole
 /// filtered set so clients can paginate without a second count request.
 #[derive(Debug, Clone, Default, PartialEq)]

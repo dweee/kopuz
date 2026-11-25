@@ -248,8 +248,8 @@ impl PlaybackSettings {
         let model = ConfigModel::global(cx);
         let config = model.read(cx).config();
         let prefer_local = config.lyrics.prefer_local_lyrics;
-        let musixmatch = config.lyrics.enable_musixmatch_lyrics;
         let romanize = config.lyrics.romanize_lyrics;
+        let word_synced = config.lyrics.prefer_word_synced_lyrics;
         let auto = config.lyrics.lyrics_offset_auto;
         let latency_ms = PlayerModel::global(cx)
             .read(cx)
@@ -276,19 +276,6 @@ impl PlaybackSettings {
             )
             .children(
                 toggle_row(
-                    "enable_musixmatch_lyrics",
-                    t("enable_musixmatch_lyrics"),
-                    musixmatch,
-                    ConfigModel::writer(|on| {
-                        SettingsEdit::Lyrics(LyricsEdit::EnableMusixmatchLyrics(on))
-                    }),
-                )
-                .bind("enable_musixmatch_lyrics", cx)
-                .description(t("enable_musixmatch_lyrics_description"))
-                .shown(cx),
-            )
-            .children(
-                toggle_row(
                     "romanize_lyrics",
                     t("romanize_lyrics"),
                     romanize,
@@ -296,6 +283,19 @@ impl PlaybackSettings {
                 )
                 .bind("romanize_lyrics", cx)
                 .description(t("romanize_lyrics_description"))
+                .shown(cx),
+            )
+            .children(
+                toggle_row(
+                    "prefer_word_synced_lyrics",
+                    t("prefer_word_synced_lyrics"),
+                    word_synced,
+                    ConfigModel::writer(|on| {
+                        SettingsEdit::Lyrics(LyricsEdit::PreferWordSyncedLyrics(on))
+                    }),
+                )
+                .bind("prefer_word_synced_lyrics", cx)
+                .description(t("prefer_word_synced_lyrics_description"))
                 .shown(cx),
             )
             .children(
@@ -730,7 +730,15 @@ fn output_device_options(
     if let Some(current) = current
         && !devices.iter().any(|device| device.id == current)
     {
-        options.push((Some(current.to_string()), current.to_string().into()));
+        // The id leads with the audio host (`alsa:hw:CARD=PCH,DEV=0`); the rest names the device.
+        let device = current
+            .split_once(':')
+            .map_or(current, |(_, device)| device);
+        let label = t_with(
+            "output_device_missing",
+            &[("device", device.to_string().into())],
+        );
+        options.push((Some(current.to_string()), label));
     }
     options
 }

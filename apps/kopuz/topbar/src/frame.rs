@@ -25,10 +25,10 @@ const TRAFFIC_LIGHT_SIZE: Pixels = px(14.);
 /// The resize edges: thin strips along the sides and larger squares at the corners.
 const EDGE: Pixels = px(5.);
 const CORNER: Pixels = px(12.);
-// `bg-black/50` and `text-white/35`: the strip as the Dioxus app drew it.
+// `bg-black/50` as the Dioxus app drew it; the title and glyphs are raised to stay readable on it.
 const STRIP_SCRIM: f32 = 0.5;
-const TITLE_INK: f32 = 0.35;
-const BUTTON_INK: f32 = 0.25;
+const TITLE_INK: f32 = style::TEXT_MUTED;
+const BUTTON_INK: f32 = style::TEXT_MUTED;
 // `hover:bg-red-500/70` on the close button.
 const CLOSE_HOVER: f32 = 0.7;
 
@@ -121,9 +121,9 @@ pub fn titlebar(window: &Window, cx: &App) -> Option<AnyElement> {
     if !draws_titlebar(mode(cx)) {
         return None;
     }
-    let zoom_glyph = match window.is_maximized() {
-        true => icons::WINDOW_RESTORE,
-        false => icons::WINDOW_MAXIMIZE,
+    let (zoom_glyph, zoom_label) = match window.is_maximized() {
+        true => (icons::WINDOW_RESTORE, t("restore_window")),
+        false => (icons::WINDOW_MAXIMIZE, t("maximize")),
     };
     Some(
         h_flex()
@@ -164,7 +164,7 @@ pub fn titlebar(window: &Window, cx: &App) -> Option<AnyElement> {
                         window_button(
                             "titlebar-zoom",
                             zoom_glyph,
-                            t("maximize"),
+                            zoom_label,
                             style::white(style::RAISED, cx),
                             cx,
                         )

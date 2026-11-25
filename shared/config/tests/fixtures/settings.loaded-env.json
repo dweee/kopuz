@@ -35,7 +35,6 @@
   "discord_presence_listen_button": true,
   "discord_presence_source": true,
   "discord_presence_upload_cover": false,
-  "enable_musixmatch_lyrics": false,
   "equalizer": {
     "bands": [
       -6.0,
@@ -108,6 +107,7 @@
     "prevent_clipping": true
   },
   "romanize_lyrics": false,
+  "prefer_word_synced_lyrics": false,
   "sample_rate_mode": "System",
   "settings_layout": "Cd",
   "show_row_images": true,

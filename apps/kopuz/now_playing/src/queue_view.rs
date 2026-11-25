@@ -320,7 +320,10 @@ impl QueueView {
         let summary = queue.summary();
         let upcoming = queue.upcoming().len();
         let empty = queue.is_empty();
-        let place = format!("{}/{}", summary.position.max(1), summary.count);
+        let place = match summary.position {
+            0 => summary.count.to_string(),
+            at => format!("{at}/{}", summary.count),
+        };
         let label = SharedString::from(match summary.total_ms {
             Some(total) => format!("{place} • {}", duration(total)),
             None => place,
@@ -375,6 +378,8 @@ impl Render for QueueView {
         if count == 0 {
             return v_flex()
                 .size_full()
+                .id("empty-queue")
+                .on_drop::<TrackDrag>(|drag, _, cx| insert_at(0, drag.keys.to_vec(), cx))
                 .child(EmptyState::new(t("no_more_songs")).icon(icons::LIST))
                 .into_any_element();
         }

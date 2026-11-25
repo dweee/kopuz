@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalPlaylist {
+    Link(String),
+    Csv { name: String, text: String },
+}
+
 /// A playlist as the wire sees it: identity, name, cover, and the track refs
 /// in order. The refs are library keys, so a client resolves them through
 /// [`crate::LibraryApi::tracks_by_keys`] like any other list.

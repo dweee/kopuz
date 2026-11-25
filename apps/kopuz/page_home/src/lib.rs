@@ -151,6 +151,7 @@ pub struct Home {
     shared: Shared,
     frozen: bool,
     playing: bool,
+    track: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -265,9 +266,12 @@ impl Home {
             cx.observe(&ForYouModel::global(cx), |this, _, cx| this.rebuild(cx)),
             cx.observe(&DownloadsModel::global(cx), |this, _, cx| this.rebuild(cx)),
             cx.observe(&PlayerModel::global(cx), |this: &mut Self, player, cx| {
-                let playing = player.read(cx).is_playing();
-                if playing != this.playing {
+                let player = player.read(cx);
+                let playing = player.is_playing();
+                let track = player.track().map(|track| track.key.clone());
+                if playing != this.playing || track != this.track {
                     this.playing = playing;
+                    this.track = track;
                     cx.notify();
                 }
             }),
@@ -299,6 +303,10 @@ impl Home {
             shared: Shared::default(),
             frozen: false,
             playing: PlayerModel::global(cx).read(cx).is_playing(),
+            track: PlayerModel::global(cx)
+                .read(cx)
+                .track()
+                .map(|track| track.key.clone()),
             _subscriptions: subscriptions,
         }
     }
@@ -441,13 +449,20 @@ impl Render for Home {
             .into_iter()
             .filter(|row| row.shown || editing)
             .collect();
-        // The hero already offers the last session, so the resume banner would say it twice.
-        let featured = arranged.iter().any(|row| {
-            row.shown
-                && matches!(row.drawn, Some(Drawn::Shelf(index))
+        // A hero showing the album the queue was left in would offer that session twice; a hero
+        // for some other album leaves the banner the only way back to where playback stopped.
+        let resumed_album = shared
+            .resume
+            .as_ref()
+            .map(|resume| resume.track.album_id.as_str());
+        let featured = resumed_album.is_some()
+            && resumed_album == self.hero_album.as_deref()
+            && arranged.iter().any(|row| {
+                row.shown
+                    && matches!(row.drawn, Some(Drawn::Shelf(index))
                     if self.shelves[index].form == data::Form::Featured
                         && !self.shelves[index].tiles.is_empty())
-        });
+            });
         let banner = match featured {
             true => None,
             false => shared.resume.as_ref().map(resume::banner),
@@ -555,6 +570,25 @@ impl Render for Home {
         let offline = shared.offline;
         // The queue to resume is not a library, so offline it does not hide that nothing else plays.
         let bare = settled && (offline || banner.is_none());
+        // A library that failed to answer is not an empty one.
+        let empty =
+            (bare && !offline).then(|| match self.albums.read(cx).error().map(store::human) {
+                Some(reason) => EmptyState::failed(
+                    t("library_read_failed"),
+                    cx.listener(|this, _, _, cx| {
+                        for query in [&this.albums, &this.recently_added, &this.new_releases] {
+                            query.update(cx, |query, cx| query.refresh(cx));
+                        }
+                    }),
+                )
+                .detail(reason),
+                None => EmptyState::new(t("no_albums_found"))
+                    .icon(icons::DISC)
+                    .detail(t("add_music_to_get_started"))
+                    .action(t("add_source"), |_, _, cx| {
+                        store::SetupModel::start_over(cx)
+                    }),
+            });
         let heading = self.heading(cx);
         v_flex()
             .id("home")
@@ -568,16 +602,7 @@ impl Render for Home {
             .children(banner)
             .children(rows)
             .when(bare && offline, |page| page.child(EmptyState::offline()))
-            .when(bare && !offline, |page| {
-                page.child(
-                    EmptyState::new(t("no_albums_found"))
-                        .icon(icons::DISC)
-                        .detail(t("add_music_to_get_started"))
-                        .action(t("add_source"), |_, _, cx| {
-                            store::SetupModel::start_over(cx)
-                        }),
-                )
-            })
+            .children(empty)
     }
 }
 

@@ -723,6 +723,18 @@ pub async fn unlinked_artist_keys(
     Ok(rows.into_iter().map(|r| (r.name_key, r.key)).collect())
 }
 
+pub async fn artist_keys_by_name(
+    pool: &SqlitePool,
+    source: &Source,
+) -> Result<std::collections::HashMap<String, String>, DbError> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT name_key, key FROM artists WHERE source = ?1")
+            .bind(source.as_str())
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// One artist of `source` by its key, counted as [`artists`] counts it.
 pub async fn artist(
     pool: &SqlitePool,
@@ -1651,6 +1663,35 @@ mod tests {
             .await
             .unwrap();
         assert!(unplayed_albums(&pool, &elsewhere).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn listening_ranks_what_this_source_played() {
+        let (pool, source) = seeded().await;
+        for key in ["/b.flac", "/b.flac", "/c.flac"] {
+            super::super::cfg_store::bump_listen_count(&pool, &source, key)
+                .await
+                .unwrap();
+        }
+        let elsewhere = Source::Server("srv".into());
+        super::super::cfg_store::bump_listen_count(&pool, &elsewhere, "/a.flac")
+            .await
+            .unwrap();
+
+        let rows = super::super::cfg_store::listening(&pool, &source, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.plays, 3);
+        assert_eq!(rows.tracks[0].key, "/b.flac");
+        assert_eq!(rows.tracks[0].plays, 2);
+        assert_eq!(rows.artists[0].name, "Ada");
+        assert_eq!(rows.artists[0].plays, 2);
+        assert_eq!(rows.days.iter().map(|day| day.plays).sum::<u32>(), 3);
+
+        let later = super::super::cfg_store::listening(&pool, &source, Some(i64::MAX))
+            .await
+            .unwrap();
+        assert_eq!(later.plays, 0);
     }
 
     #[tokio::test]

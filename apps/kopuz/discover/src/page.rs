@@ -49,11 +49,15 @@ pub struct CatalogPage {
     // The source can keep marking a chip after it was cleared, so the local pick wins.
     picked: Option<Option<String>>,
     detail: Option<CatalogDetail>,
+    /// The page `detail` was read for, which a chip switch leaves behind until the new one answers.
+    detail_for: String,
     // Whether the first shelf held is the page's own track list.
     tracks_first: bool,
     shelves: Entity<Shelves>,
     loading: bool,
     paging: Option<Paging>,
+    /// The cursor that just failed and where it pointed, kept so the reader can ask for it again.
+    stalled: Option<(Paging, String)>,
     error: Option<SharedString>,
     // Bumped per load; a slow answer for one chip must not land after the user moved to another.
     generation: u64,
@@ -94,10 +98,12 @@ impl CatalogPage {
             strapline_to_host: embedded,
             picked: None,
             detail: None,
+            detail_for: String::new(),
             tracks_first: false,
             shelves,
             loading: false,
             paging: None,
+            stalled: None,
             error: None,
             generation: 0,
             reveal: motion::Fade::hidden(),
@@ -119,6 +125,7 @@ impl CatalogPage {
         let generation = self.generation;
         self.error = None;
         self.paging = None;
+        self.stalled = None;
         self._more = None;
         // A page seen this session draws at once; a stale one is fetched again behind it.
         let cached = CatalogCache::get(&self.showing, cx);
@@ -157,11 +164,14 @@ impl CatalogPage {
                         CatalogCache::put(&this.showing, ticket, detail.clone(), cx);
                         this.show(detail, cx);
                     }
-                    // A stale page on screen beats an error over it.
-                    Err(error) if this.detail.is_some() => {
+                    // A stale copy of the same page on screen beats an error over it; another chip's does not.
+                    Err(error) if this.detail.is_some() && this.detail_for == this.showing => {
                         tracing::warn!(%error, "catalog page refresh failed");
                     }
-                    Err(error) => this.error = Some(states::catalog_failure(&error)),
+                    Err(error) => {
+                        this.detail = None;
+                        this.error = Some(states::catalog_failure(&error));
+                    }
                 }
                 cx.notify();
             })
@@ -170,6 +180,7 @@ impl CatalogPage {
     }
 
     fn show(&mut self, detail: CatalogDetail, cx: &mut Context<Self>) {
+        self.detail_for = self.showing.clone();
         let mut held = Vec::with_capacity(detail.shelves.len() + 1);
         self.tracks_first = !detail.tracks.is_empty();
         if self.tracks_first {
@@ -279,6 +290,7 @@ impl CatalogPage {
             continuation: Some(token.clone()),
             ..CatalogDetailRequest::page(self.showing.clone())
         };
+        let asked = token.clone();
         let call = Link::global(cx).call(move |api| async move {
             match feed {
                 true => api.catalog(Some(token)).await.map(feed_detail),
@@ -304,8 +316,10 @@ impl CatalogPage {
                     }
                     Err(error) => {
                         tracing::warn!(%error, "catalog page continuation failed");
-                        // Stop asking: a failed cursor fails again on every scroll.
+                        // Stop asking on scroll: a failed cursor fails again every time. The
+                        // reader can still ask once more.
                         this.forget_cursor(paging);
+                        this.stalled = Some((paging, asked));
                     }
                 }
                 cx.notify();
@@ -410,7 +424,7 @@ impl CatalogPage {
                 return PageHeader::new(title).into_any_element();
             }
             CatalogHeader::Detail => HeaderLayout::Row,
-            CatalogHeader::Artist => HeaderLayout::Banner,
+            CatalogHeader::Artist => HeaderLayout::Portrait,
         };
         let play = detail.playback_id.clone().map(|id| {
             DetailActions::new("catalog-page", Rc::<[String]>::from([]))
@@ -501,6 +515,19 @@ impl Render for CatalogPage {
                     components::Loading::new()
                         .label(t("discover_more_loading"))
                         .compact(),
+                )
+            })
+            .when(self.stalled.is_some() && self.paging.is_none(), |page| {
+                page.child(
+                    EmptyState::failed(
+                        t("discover_more_failed"),
+                        cx.listener(|this, _, _, cx| {
+                            if let Some((paging, token)) = this.stalled.take() {
+                                this.load_more(paging, token, cx);
+                            }
+                        }),
+                    )
+                    .compact(),
                 )
             });
         if self.embedded {

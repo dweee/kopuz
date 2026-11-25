@@ -211,6 +211,16 @@ impl Kopuz for KopuzGrpc {
         .await
     }
 
+    async fn set_speed(
+        &self,
+        request: Request<proto::SetSpeed>,
+    ) -> Result<Response<proto::MutationResult>, Status> {
+        self.player_mutation(api::PlayerCommand::SetSpeed {
+            speed: request.get_ref().speed,
+        })
+        .await
+    }
+
     async fn set_muted(
         &self,
         request: Request<proto::SetMuted>,
@@ -776,6 +786,32 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(proto::PlaylistId { id }))
     }
 
+    async fn import_external_playlist(
+        &self,
+        request: Request<proto::ImportExternalPlaylistRequest>,
+    ) -> Result<Response<proto::PlaylistImport>, Status> {
+        use proto::import_external_playlist_request::Source;
+        let source = match request.into_inner().source {
+            Some(Source::Link(link)) => api::ExternalPlaylist::Link(link),
+            Some(Source::Csv(csv)) => api::ExternalPlaylist::Csv {
+                name: csv.name,
+                text: csv.text,
+            },
+            None => return Err(Status::invalid_argument("no playlist to import")),
+        };
+        let import = self
+            .0
+            .api
+            .import_external_playlist(source)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::PlaylistImport {
+            id: import.id,
+            matched: import.matched,
+            missing: import.missing,
+        }))
+    }
+
     async fn import_playlist(
         &self,
         request: Request<proto::ImportPlaylistRequest>,
@@ -945,6 +981,63 @@ impl Kopuz for KopuzGrpc {
             .await
             .map_err(failed)?;
         Ok(Response::new(proto::Unit {}))
+    }
+
+    async fn get_similar_artists(
+        &self,
+        request: Request<proto::SimilarArtistsRequest>,
+    ) -> Result<Response<proto::SimilarArtists>, Status> {
+        let artists = self
+            .0
+            .api
+            .similar_artists(request.into_inner().name)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::SimilarArtists {
+            artists: artists
+                .into_iter()
+                .map(|artist| proto::SimilarArtist {
+                    name: artist.name,
+                    key: artist.key,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn get_listening_stats(
+        &self,
+        request: Request<proto::ListeningStatsRequest>,
+    ) -> Result<Response<proto::ListeningStats>, Status> {
+        let stats = self
+            .0
+            .api
+            .listening_stats(request.into_inner().days)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::ListeningStats {
+            plays: stats.plays,
+            seconds: stats.seconds,
+            tracks: stats
+                .tracks
+                .into_iter()
+                .map(|track| proto::RankedTrack {
+                    key: track.key,
+                    title: track.title,
+                    artist: track.artist,
+                    plays: track.plays,
+                })
+                .collect(),
+            artists: stats.artists.into_iter().map(ranked_to_proto).collect(),
+            albums: stats.albums.into_iter().map(ranked_to_proto).collect(),
+            days: stats
+                .days
+                .into_iter()
+                .map(|day| proto::DayPlays {
+                    day: day.day,
+                    plays: day.plays,
+                })
+                .collect(),
+        }))
     }
 
     async fn get_stats(
@@ -2266,5 +2359,13 @@ mod tests {
             b"not a socket",
             "a failed connect is not licence to unlink a file"
         );
+    }
+}
+
+fn ranked_to_proto(ranked: api::Ranked) -> proto::Ranked {
+    proto::Ranked {
+        name: ranked.name,
+        detail: ranked.detail,
+        plays: ranked.plays,
     }
 }

@@ -81,7 +81,6 @@ impl Motion {
     }
 }
 
-/// Which side of the content the now-playing sheet's panel sits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
@@ -206,6 +205,8 @@ pub struct Nav {
     pub order: Vec<String>,
     pub hidden: Vec<String>,
     pub start: String,
+    pub controls_up_top: bool,
+    pub rail_hidden: bool,
 }
 
 impl Default for Nav {
@@ -219,6 +220,8 @@ impl Default for Nav {
                 .map(|name| name.to_string())
                 .collect(),
             start: "home".into(),
+            controls_up_top: false,
+            rail_hidden: false,
         }
     }
 }
@@ -351,6 +354,11 @@ pub struct Panel {
     pub shown: bool,
     pub width: f32,
     pub pinned: Vec<String>,
+    pub pins: Vec<Pin>,
+    pub show_pins: bool,
+    pub show_playlists: bool,
+    pub playlist_covers: bool,
+    pub side: Side,
 }
 
 impl Default for Panel {
@@ -359,6 +367,101 @@ impl Default for Panel {
             shown: true,
             width: 260.,
             pinned: Vec::new(),
+            pins: Vec::new(),
+            show_pins: true,
+            show_playlists: true,
+            playlist_covers: false,
+            side: Side::Left,
+        }
+    }
+}
+
+impl Panel {
+    pub fn is_pinned(&self, kind: PinKind, id: &str) -> bool {
+        self.pins.iter().any(|pin| pin.kind == kind && pin.id == id)
+    }
+
+    pub fn toggle_pin(&mut self, pin: Pin) {
+        match self.is_pinned(pin.kind, &pin.id) {
+            true => self
+                .pins
+                .retain(|held| !(held.kind == pin.kind && held.id == pin.id)),
+            false => self.pins.push(pin),
+        }
+    }
+
+    pub fn move_pin(&mut self, kind: PinKind, id: &str, to: usize) {
+        let Some(from) = self
+            .pins
+            .iter()
+            .position(|pin| pin.kind == kind && pin.id == id)
+        else {
+            return;
+        };
+        let pin = self.pins.remove(from);
+        let to = if to > from { to - 1 } else { to };
+        self.pins.insert(to.min(self.pins.len()), pin);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinKind {
+    Album,
+    Artist,
+    Playlist,
+    Folder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pin {
+    pub kind: PinKind,
+    pub id: String,
+    pub name: String,
+}
+
+impl Pin {
+    pub fn of(target: &crate::Target) -> Option<Self> {
+        use crate::Target;
+        let (kind, id, name) = match target {
+            Target::Album { id, title } => (PinKind::Album, id.to_string(), title.to_string()),
+            Target::Artist { key, name } => (PinKind::Artist, key.clone(), name.to_string()),
+            Target::Playlist { id, name } => (PinKind::Playlist, id.to_string(), name.to_string()),
+            Target::Folder { id, name } => (PinKind::Folder, id.to_string(), name.to_string()),
+            _ => return None,
+        };
+        Some(Self { kind, id, name })
+    }
+
+    pub fn route(&self) -> crate::Route {
+        use crate::Route;
+        match self.kind {
+            PinKind::Album => Route::Album(self.id.clone().into()),
+            PinKind::Artist => Route::Artist(self.id.clone()),
+            PinKind::Playlist => Route::Playlist(self.id.clone().into()),
+            PinKind::Folder => Route::PlaylistFolder(self.id.clone().into()),
+        }
+    }
+
+    pub fn target(&self) -> crate::Target {
+        use crate::Target;
+        match self.kind {
+            PinKind::Album => Target::Album {
+                id: self.id.clone().into(),
+                title: self.name.clone().into(),
+            },
+            PinKind::Artist => Target::Artist {
+                key: self.id.clone(),
+                name: self.name.clone().into(),
+            },
+            PinKind::Playlist => Target::Playlist {
+                id: self.id.clone().into(),
+                name: self.name.clone().into(),
+            },
+            PinKind::Folder => Target::Folder {
+                id: self.id.clone().into(),
+                name: self.name.clone().into(),
+            },
         }
     }
 }
@@ -400,6 +503,7 @@ pub struct Player {
     pub cover: TileSize,
     pub mini_frameless: bool,
     pub mini_hides_main: bool,
+    pub tray_lyrics: bool,
 }
 
 impl Default for Player {
@@ -416,6 +520,7 @@ impl Default for Player {
             cover: TileSize::Medium,
             mini_frameless: false,
             mini_hides_main: false,
+            tray_lyrics: false,
         }
     }
 }
@@ -429,6 +534,26 @@ pub struct Sheet {
     pub backdrop: Backdrop,
     pub cover: HeroSize,
     pub queue: QueueStyle,
+    pub lyrics: LyricsScale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LyricsScale(pub u16);
+
+impl Default for LyricsScale {
+    fn default() -> Self {
+        Self(100)
+    }
+}
+
+impl LyricsScale {
+    pub const MIN: u16 = 80;
+    pub const MAX: u16 = 300;
+
+    pub fn scale(self) -> f32 {
+        f32::from(self.0.clamp(Self::MIN, Self::MAX)) / 100.
+    }
 }
 
 /// How the queue lists its rows, in the sheet and the docked column alike.
@@ -460,7 +585,7 @@ impl HeroSize {
             Self::Small => 320.,
             Self::Medium => 420.,
             Self::Large => 540.,
-            Self::ExtraLarge => 680.,
+            Self::ExtraLarge => 960.,
         }
     }
 
@@ -469,7 +594,7 @@ impl HeroSize {
         match self {
             Self::Small | Self::Medium => 0.5,
             Self::Large => 0.58,
-            Self::ExtraLarge => 0.66,
+            Self::ExtraLarge => 0.72,
         }
     }
 }
@@ -781,6 +906,20 @@ impl Palette {
 pub struct Interface {
     pub scale: f32,
     pub font: Option<String>,
+    pub page_width: PageWidth,
+    pub similar_artists: bool,
+    pub queue_side: Side,
+    /// The docked queue and lyrics column, as last dragged; `None` keeps the default.
+    pub queue_width: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageWidth {
+    #[default]
+    Standard,
+    Wide,
+    Full,
 }
 
 impl Default for Interface {
@@ -788,6 +927,10 @@ impl Default for Interface {
         Self {
             scale: 1.,
             font: None,
+            page_width: PageWidth::Standard,
+            similar_artists: false,
+            queue_side: Side::Right,
+            queue_width: None,
         }
     }
 }
@@ -799,6 +942,16 @@ pub struct Notifications {
     pub errors: bool,
     /// Per job kind; a kind with no entry toasts.
     pub jobs: BTreeMap<String, bool>,
+    pub track_change: TrackToast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackToast {
+    #[default]
+    Off,
+    InApp,
+    Desktop,
 }
 
 impl Default for Notifications {
@@ -806,6 +959,7 @@ impl Default for Notifications {
         Self {
             errors: true,
             jobs: BTreeMap::new(),
+            track_change: TrackToast::Off,
         }
     }
 }
@@ -1227,6 +1381,39 @@ mod tests {
         let text = toml::to_string_pretty(&layout).expect("serialise");
         let back: Layout = toml::from_str(&text).expect("deserialise");
         assert_eq!(layout, back);
+    }
+
+    fn pin(kind: PinKind, id: &str) -> Pin {
+        Pin {
+            kind,
+            id: id.into(),
+            name: id.into(),
+        }
+    }
+
+    #[test]
+    fn pinning_twice_unpins() {
+        let mut panel = Panel::default();
+        panel.toggle_pin(pin(PinKind::Album, "a"));
+        panel.toggle_pin(pin(PinKind::Artist, "a"));
+        assert!(panel.is_pinned(PinKind::Album, "a"));
+        panel.toggle_pin(pin(PinKind::Album, "a"));
+        assert!(!panel.is_pinned(PinKind::Album, "a"));
+        assert!(panel.is_pinned(PinKind::Artist, "a"));
+    }
+
+    #[test]
+    fn a_pin_moves_to_the_gap_it_is_dropped_on() {
+        let mut panel = Panel::default();
+        for id in ["a", "b", "c"] {
+            panel.toggle_pin(pin(PinKind::Playlist, id));
+        }
+        panel.move_pin(PinKind::Playlist, "a", 3);
+        let ids: Vec<&str> = panel.pins.iter().map(|pin| pin.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c", "a"]);
+        panel.move_pin(PinKind::Playlist, "a", 0);
+        let ids: Vec<&str> = panel.pins.iter().map(|pin| pin.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
     }
 
     #[test]

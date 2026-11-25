@@ -53,6 +53,7 @@ pub struct SelectionBar {
     count: usize,
     verbs: Vec<Verb>,
     target: Option<Target>,
+    menu: Option<menus::Menu>,
     delete: Option<Run>,
     cancel: Option<Run>,
     lift: Rems,
@@ -65,6 +66,7 @@ impl SelectionBar {
             count,
             verbs: Vec::new(),
             target: None,
+            menu: None,
             delete: None,
             cancel: None,
             lift: rems(2.5),
@@ -79,6 +81,12 @@ impl SelectionBar {
     /// What the dots menu acts on, and what a delete's confirmation names.
     pub fn target(mut self, target: Target) -> Self {
         self.target = Some(target);
+        self
+    }
+
+    /// The dots menu, when its items must run some other way than straight on `target`.
+    pub fn menu(mut self, menu: menus::Menu) -> Self {
+        self.menu = Some(menu);
         self
     }
 
@@ -137,9 +145,9 @@ impl RenderOnce for SelectionBar {
             });
             verb("delete".into(), icons::TRASH, t("delete"), confirm)
         });
-        let more = self.target.map(|target| {
-            MenuButton::new(format!("{id}-more"), menus::menu_for(target))
-                .variant(MenuVariant::Bare(ink))
+        let menu = self.menu.or_else(|| self.target.map(menus::menu_for));
+        let more = menu.map(|menu| {
+            MenuButton::new(format!("{id}-more"), menu).variant(MenuVariant::Bare(ink))
         });
         let cancel = self.cancel;
         div()
@@ -197,6 +205,8 @@ pub struct Selection {
     everything: bool,
     /// Where a shift-click extends from, as an index into the whole listing.
     anchor: Option<usize>,
+    /// What the last shift-click added, which the next one from the same anchor replaces.
+    ranged: Vec<String>,
     /// Where the arrows are, as an index into the whole listing.
     cursor: Option<usize>,
 }
@@ -280,6 +290,7 @@ impl Selection {
             self.picked.push(id.to_string());
             self.anchor = Some(index);
         }
+        self.ranged.clear();
         self.cursor = Some(index);
     }
 
@@ -289,9 +300,14 @@ impl Selection {
         let anchor = self.anchor.unwrap_or(index);
         let (first, last) = (anchor.min(index), anchor.max(index));
         self.forget_everything();
+        for id in std::mem::take(&mut self.ranged) {
+            self.held.remove(&id);
+            self.picked.retain(|held| *held != id);
+        }
         for slot in first..=last {
             let Some(id) = rows(slot) else { continue };
             if self.held.insert(id.clone()) {
+                self.ranged.push(id.clone());
                 self.picked.push(id);
             }
         }
@@ -331,6 +347,15 @@ mod tests {
 
     fn rows(index: usize) -> Option<String> {
         (index < 10).then(|| format!("k{index}"))
+    }
+
+    #[test]
+    fn a_second_shift_click_closer_to_the_anchor_shrinks_the_range() {
+        let mut selection = Selection::new();
+        selection.toggle("k2", 2);
+        selection.extend_to(6, rows);
+        selection.extend_to(4, rows);
+        assert_eq!(selection.picked(), ["k2", "k3", "k4"]);
     }
 
     #[test]

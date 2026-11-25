@@ -5,6 +5,7 @@ mod columns;
 mod facet;
 mod filters;
 mod grid;
+mod listening;
 mod playlists;
 mod settings;
 mod states;
@@ -53,6 +54,8 @@ actions!(
         FocusFilter,
         CursorUp,
         CursorDown,
+        CursorLeft,
+        CursorRight,
         Activate,
         SelectEverything,
         ClearSelection,
@@ -68,6 +71,8 @@ pub fn register(cx: &mut App) {
         KeyBinding::new("/", FocusFilter, Some("Library")),
         KeyBinding::new("down", CursorDown, Some("Library")),
         KeyBinding::new("up", CursorUp, Some("Library")),
+        KeyBinding::new("left", CursorLeft, Some("Library")),
+        KeyBinding::new("right", CursorRight, Some("Library")),
         KeyBinding::new("enter", Activate, Some("Library")),
         KeyBinding::new("ctrl-a", SelectEverything, Some("Library")),
         KeyBinding::new("cmd-a", SelectEverything, Some("Library")),
@@ -77,6 +82,8 @@ pub fn register(cx: &mut App) {
         // The deeper Input context wins, so "/" typed into a filter box stays a character.
         KeyBinding::new("/", gpui_kit::NoAction, Some("Library > Input")),
         KeyBinding::new("down", gpui_kit::NoAction, Some("Library > Input")),
+        KeyBinding::new("left", gpui_kit::NoAction, Some("Library > Input")),
+        KeyBinding::new("right", gpui_kit::NoAction, Some("Library > Input")),
         KeyBinding::new("up", gpui_kit::NoAction, Some("Library > Input")),
     ]);
 }
@@ -175,6 +182,7 @@ pub struct Library {
     liked: bool,
     /// The Activity page: tracks only, in a layout of its own, and none of it written to the library's route.
     activity: bool,
+    listening: Option<Entity<listening::ListeningPanel>>,
     // What the route last said, so adopting a route change cannot fight the page's own edit.
     encoded: String,
     columns: Vec<Column>,
@@ -211,6 +219,7 @@ pub struct Library {
     // Artists already sent for a photo; the daemon remembers its misses, this saves the round trip.
     asked_artwork: HashSet<String>,
     playing: store::Playing,
+    sounding: bool,
     // The playing row lights only while the queue is this listing, judged as the Dioxus table did: by length.
     queued: bool,
     pager: Pager,
@@ -396,6 +405,7 @@ impl Library {
             filters,
             liked,
             activity,
+            listening: activity.then(|| cx.new(listening::ListeningPanel::new)),
             encoded: opening,
             columns: Vec::new(),
             sort: Sort::default(),
@@ -424,6 +434,7 @@ impl Library {
             playlist_offline: HashMap::new(),
             asked_artwork: HashSet::new(),
             playing: store::Playing::default(),
+            sounding: false,
             queued: false,
             pager: Pager::new(),
             window_request: None,
@@ -890,6 +901,11 @@ impl Library {
             .track()
             .map(store::Playing::of)
             .unwrap_or_default();
+        let sounding = player.read(cx).is_playing();
+        if sounding != self.sounding {
+            self.sounding = sounding;
+            cx.notify();
+        }
         if playing == self.playing {
             return;
         }
@@ -994,7 +1010,10 @@ impl Library {
             Facet::Tracks => self.tracks.read(cx).is_settled(),
             Facet::Albums => self.albums.read(cx).is_settled(),
             Facet::Artists => self.artists.read(cx).is_settled(),
-            Facet::Playlists => PlaylistsModel::global(cx).read(cx).is_loaded(),
+            Facet::Playlists => {
+                let playlists = PlaylistsModel::global(cx).read(cx);
+                playlists.is_loaded() || playlists.error().is_some()
+            }
         }
     }
 
@@ -1012,7 +1031,7 @@ impl Library {
             Facet::Tracks => self.tracks.read(cx).error().cloned(),
             Facet::Albums => self.albums.read(cx).error().cloned(),
             Facet::Artists => self.artists.read(cx).error().cloned(),
-            Facet::Playlists => None,
+            Facet::Playlists => PlaylistsModel::global(cx).read(cx).error().cloned(),
         }
     }
 
@@ -1073,9 +1092,26 @@ impl Library {
     pub(crate) fn jump_to(&self, index: usize) {
         let band = match self.filters.facet.is_grid() && self.mode == ViewMode::Grid {
             true => index / self.grid.columns(),
-            false => index,
+            // Grouped, the table draws a heading line before each group, so a row sits further down.
+            false => self
+                .lines
+                .iter()
+                .position(|line| matches!(line, Line::Track(at) if *at == index))
+                .unwrap_or(index),
         };
         self.scroll.scroll_to_item(band, ScrollStrategy::Top);
+    }
+
+    fn is_grid(&self) -> bool {
+        self.filters.facet.is_grid() && self.mode == ViewMode::Grid
+    }
+
+    /// How far Up and Down move: a whole row of tiles across a grid, one line in a list.
+    fn row_step(&self) -> isize {
+        match self.is_grid() {
+            true => self.grid.columns().max(1) as isize,
+            false => 1,
+        }
     }
 
     fn move_cursor(&mut self, step: isize, cx: &mut Context<Self>) {
@@ -1167,8 +1203,25 @@ impl Render for Library {
             .on_action(
                 cx.listener(|this, _: &FocusFilter, window, cx| this.focus_filter(window, cx)),
             )
-            .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.move_cursor(1, cx)))
-            .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.move_cursor(-1, cx)))
+            .on_action(
+                cx.listener(|this, _: &CursorDown, _, cx| this.move_cursor(this.row_step(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CursorUp, _, cx| this.move_cursor(-this.row_step(), cx)),
+            )
+            // Across a grid the side arrows step a tile; in a list they stay the player's seek.
+            .on_action(
+                cx.listener(|this, _: &CursorLeft, _, cx| match this.is_grid() {
+                    true => this.move_cursor(-1, cx),
+                    false => cx.propagate(),
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &CursorRight, _, cx| match this.is_grid() {
+                    true => this.move_cursor(1, cx),
+                    false => cx.propagate(),
+                }),
+            )
             .on_action(cx.listener(|this, _: &SelectEverything, _, cx| this.select_everything(cx)))
             .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.clear_selection(cx)))
             .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
@@ -1182,7 +1235,6 @@ impl Render for Library {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .pb_8()
                     // A held value that answers the previous filters is dimmed, never blanked.
                     .when(dimmed, |body| body.opacity(0.55))
                     .child(body),

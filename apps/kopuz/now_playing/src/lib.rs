@@ -10,6 +10,7 @@ mod queue_view;
 mod seek;
 mod settings;
 mod sheet;
+mod stage;
 mod swap;
 mod transport;
 mod video;
@@ -28,6 +29,7 @@ pub use bar::{bar_height, utility_metrics};
 pub use lyrics_view::LyricsView;
 pub use queue_view::QueueView;
 pub use settings::register as register_settings;
+pub use stage::toggle_stage;
 pub use window::{MiniWindow, close_mini, is_open as mini_is_open, open_mini, toggle_mini};
 
 use seek::{Layout, PlayheadClock, SeekRow};
@@ -85,10 +87,13 @@ pub struct NowPlaying {
     swap: swap::TrackSwap,
     /// The sheet's own fade, so it can fold away before the shell takes it down.
     sheet_fade: components::motion::Fade,
+    detached: bool,
     /// The tab body drawn last and the one it is crossfading from.
     tab_drawn: Option<SheetTab>,
     tab_leaving: Option<SheetTab>,
     tab_fade: components::motion::Fade,
+    /// Why the last device read failed, so the popover does not pass it off as no devices.
+    devices_error: Option<gpui_kit::SharedString>,
     devices_open: bool,
     devices: Vec<api::ExternalDevice>,
     /// The cut asked for and the track it was asked on, shown pressed until the swap lands.
@@ -120,6 +125,15 @@ impl NowPlaying {
     /// The sheet that grows out of the bar, over the page.
     pub fn sheet(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new(Presentation::Sheet, window, cx)
+    }
+
+    pub fn detached_sheet(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new(Presentation::Sheet, window, cx);
+        this.detached = true;
+        // No main sheet opens this one, so it starts open and stays open until its window goes.
+        this.sheet_focus.set_open(true, window, cx);
+        this.sync_video(cx);
+        this
     }
 
     /// The docked queue-and-lyrics column beside the content.
@@ -158,7 +172,7 @@ impl NowPlaying {
             }),
             cx.observe_in(&Chrome::global(cx), window, |this, chrome, window, cx| {
                 if this.presentation == Presentation::Sheet {
-                    let open = chrome.read(cx).is_sheet_open();
+                    let open = this.detached || chrome.read(cx).is_sheet_open();
                     // Forgetting the landing makes the cover head for the bar now and fly out of it on every open.
                     if !open {
                         this.hero = None;
@@ -193,10 +207,11 @@ impl NowPlaying {
             volume,
             volume_held: false,
             tab: store::layout(cx).sheet.tab,
-            panel_width: None,
+            panel_width: store::layout(cx).interface.queue_width.map(gpui_kit::px),
             root: None,
             hero: None,
             sheet_fade: components::motion::Fade::hidden(),
+            detached: false,
             tab_drawn: None,
             tab_leaving: None,
             tab_fade: components::motion::Fade::shown(),
@@ -205,6 +220,7 @@ impl NowPlaying {
                 swap.follow(PlayerModel::global(cx).read(cx).track());
                 swap
             },
+            devices_error: None,
             devices_open: false,
             devices: Vec::new(),
             requested_version: None,

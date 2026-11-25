@@ -4,11 +4,12 @@ use components::motion;
 use gpui_kit::component::{ActiveTheme as _, Root, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled,
+    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels, Render, Styled,
     Subscription, Task, Window, div, px,
 };
 use gpui_kit::{FocusHandle, InteractiveElement as _, actions};
 use link::Connection;
+use store::layout::Side;
 use store::{Chrome, ConfigModel, Navigator, PlayerModel, SourcesModel};
 
 use crate::router::Router;
@@ -95,9 +96,12 @@ pub struct Shell {
     focus: FocusHandle,
     connection: Entity<Connection>,
     topbar: Entity<topbar::TopBar>,
+    control_bar: Entity<topbar::ControlBar>,
     playlists_panel: Entity<playlists_panel::PlaylistsPanel>,
     player_bar: Entity<now_playing::NowPlaying>,
     side_panel: Entity<now_playing::NowPlaying>,
+    playlists_slot: (Pixels, bool),
+    side_panel_width: Pixels,
     fullscreen: Entity<now_playing::NowPlaying>,
     quick_search: Entity<palette::Palette>,
     mini_player: Entity<now_playing::NowPlaying>,
@@ -159,10 +163,36 @@ impl Shell {
         let config = ConfigModel::global(cx);
         let sources = SourcesModel::global(cx);
         let first_run = cx.new(|cx| onboarding::FirstRun::new(window, cx));
+        let playlists_panel = cx.new(|cx| playlists_panel::PlaylistsPanel::new(window, cx));
+        let side_panel = cx.new(|cx| now_playing::NowPlaying::panel(window, cx));
+        let playlists_slot = {
+            let panel = playlists_panel.read(cx);
+            (panel.width(), panel.is_open(cx))
+        };
+        let side_panel_width = side_panel.read(cx).panel_width();
         let booted = connection.read(cx).is_connected()
             && store::SetupModel::global(cx).read(cx).is_decided();
 
         let subscriptions = vec![
+            // The panels size their own slots, so a drag or a toggle has to redraw the shell around them.
+            cx.observe(&playlists_panel, |this, panel, cx| {
+                let slot = {
+                    let panel = panel.read(cx);
+                    (panel.width(), panel.is_open(cx))
+                };
+                if this.playlists_slot != slot {
+                    this.playlists_slot = slot;
+                    cx.notify();
+                }
+            }),
+            // The column notifies on every playhead tick; only its width matters here.
+            cx.observe(&side_panel, |this, panel, cx| {
+                let width = panel.read(cx).panel_width();
+                if this.side_panel_width != width {
+                    this.side_panel_width = width;
+                    cx.notify();
+                }
+            }),
             // Unmounted, the guide's own notify has no ancestor to dirty, so it would never appear.
             cx.observe(&first_run, |_, _, cx| cx.notify()),
             cx.observe(&store::SetupModel::global(cx), |this, _, cx| this.boot(cx)),
@@ -202,8 +232,11 @@ impl Shell {
                 this.follow_frame(window, cx);
                 cx.notify();
             }),
-            // The skin sizes the player bar, which the toasts have to clear.
-            cx.observe(&store::LayoutModel::global(cx), |_, _, cx| place_toasts(cx)),
+            // The skin sizes the player bar, which the toasts have to clear; the rest moves the panes.
+            cx.observe(&store::LayoutModel::global(cx), |_, _, cx| {
+                place_toasts(cx);
+                cx.notify();
+            }),
             // Held from the ask, not the answer: the queue and the mix change before the source list does.
             cx.subscribe(&sources, |this, _, _: &store::SwitchStarted, cx| {
                 this.hand_over(true, cx);
@@ -236,14 +269,18 @@ impl Shell {
         let topbar = cx.new(|cx| topbar::TopBar::new(window, cx));
         let cluster = cx.new(|cx| status::StatusCluster::new(window, cx));
         topbar.update(cx, |bar, cx| bar.set_activity(Some(cluster.into()), cx));
+        let control_bar = cx.new(|cx| topbar::ControlBar::new(topbar.clone(), cx));
         Self {
             router: Router::default(),
             focus,
             connection,
             topbar,
-            playlists_panel: cx.new(|cx| playlists_panel::PlaylistsPanel::new(window, cx)),
+            control_bar,
+            playlists_panel,
             player_bar: cx.new(|cx| now_playing::NowPlaying::bar(window, cx)),
-            side_panel: cx.new(|cx| now_playing::NowPlaying::panel(window, cx)),
+            side_panel,
+            playlists_slot,
+            side_panel_width,
             fullscreen: cx.new(|cx| now_playing::NowPlaying::sheet(window, cx)),
             quick_search: cx.new(|cx| palette::Palette::new(window, cx)),
             mini_player: cx.new(|cx| now_playing::NowPlaying::mini(window, cx)),
@@ -503,6 +540,16 @@ impl Render for Shell {
             window.focus(&self.focus, cx);
         }
         let connected = self.connection.read(cx).is_connected();
+        let nav_left = components::skin::nav_position(store::layout(cx).nav.position)
+            == store::layout::NavPosition::Left;
+        let playlists = self.playlists_panel.read(cx);
+        let playlists_open = playlists.is_open(cx) && connected;
+        let playlists_width = playlists.width();
+        let in_rail = nav_left && playlists_open;
+        self.playlists_panel
+            .update(cx, |panel, cx| panel.set_merged(nav_left, cx));
+        let rail = in_rail.then(|| gpui_kit::AnyView::from(self.playlists_panel.clone()));
+        self.topbar.update(cx, |bar, cx| bar.set_rail(rail, cx));
         let chrome = Chrome::global(cx).read(cx);
         // The sheet is a full-window overlay, not a body state: its hero cover flies out of the
         // bar's own cover slot, so the bar has to still be there underneath it.
@@ -510,13 +557,26 @@ impl Render for Shell {
         // A disconnect outranks compact: a mini player with nothing behind it would keep showing
         // the last track it saw, with no way to learn the daemon had gone.
         let compact = chrome.is_compact() && connected;
-        let nav_left = components::skin::nav_position(store::layout(cx).nav.position)
-            == store::layout::NavPosition::Left;
         let rtl = i18n::is_rtl();
-        let bar = Some(self.topbar.clone());
-        let playlists = self.playlists_panel.read(cx);
-        let playlists_open = playlists.is_open(cx) && connected;
-        let playlists_width = playlists.width();
+        let chrome_metrics = components::style::chrome();
+        let controls_on_top = self.topbar.read(cx).controls_on_top();
+        let rail_hidden = controls_on_top && store::layout(cx).nav.rail_hidden;
+        let rail_bar = (nav_left && !rail_hidden).then(|| {
+            gpui_kit::AnyView::from(self.topbar.clone()).cached(
+                gpui_kit::StyleRefinement::default()
+                    .h_full()
+                    .w(chrome_metrics.rail_width)
+                    .flex_shrink_0(),
+            )
+        });
+        let top_bar = (!nav_left).then(|| {
+            gpui_kit::AnyView::from(self.topbar.clone()).cached(
+                gpui_kit::StyleRefinement::default()
+                    .w_full()
+                    .h(chrome_metrics.bar_height)
+                    .flex_shrink_0(),
+            )
+        });
         let panel_open = chrome.panel().is_some();
         let quick_search_shown =
             chrome.is_quick_search_open() || self.quick_search.read(cx).is_visible();
@@ -548,6 +608,35 @@ impl Render for Shell {
             false => pane,
         };
 
+        let playlists_side = store::layout(cx).panel.side;
+        let queue_side = store::layout(cx).interface.queue_side;
+        let playlists_column = (playlists_open && !in_rail).then(|| {
+            div()
+                .w(playlists_width)
+                .flex_shrink_0()
+                .child(
+                    gpui_kit::AnyView::from(self.playlists_panel.clone())
+                        .cached(gpui_kit::StyleRefinement::default().size_full()),
+                )
+                .into_any_element()
+        });
+        let queue_column = (dock > 0.).then(|| {
+            card(div())
+                .flex_shrink_0()
+                .overflow_hidden()
+                .w(panel_width * dock)
+                .opacity(dock)
+                .child(div().w(panel_width).h_full().child(self.side_panel.clone()))
+                .into_any_element()
+        });
+        let (playlists_left, playlists_right) = match playlists_side {
+            Side::Left => (playlists_column, None),
+            Side::Right => (None, playlists_column),
+        };
+        let (queue_left, queue_right) = match queue_side {
+            Side::Left => (queue_column, None),
+            Side::Right => (None, queue_column),
+        };
         // Compact swaps the body and nothing else. It used to return early, above the key context
         // and the dialog, sheet and notification layers, so the mini player had no shortcuts, no
         // toasts and no dialogs — and, being above the `connected` check, went on showing the last
@@ -558,7 +647,17 @@ impl Render for Shell {
             v_flex()
                 .size_full()
                 .w_full()
-                .children(bar.clone().filter(|_| !nav_left))
+                .when(controls_on_top, |body| {
+                    body.child(
+                        gpui_kit::AnyView::from(self.control_bar.clone()).cached(
+                            gpui_kit::StyleRefinement::default()
+                                .w_full()
+                                .h(chrome_metrics.bar_height)
+                                .flex_shrink_0(),
+                        ),
+                    )
+                })
+                .children(top_bar)
                 .when(show_player_bar && player_at_top, |body| {
                     body.child(self.player_bar.clone())
                 })
@@ -576,15 +675,9 @@ impl Render for Shell {
                                 .pr(skin.pane_gap * 1.5)
                                 .when(!nav_left, |body| body.pl(skin.pane_gap * 1.5))
                         })
-                        .children(bar.filter(|_| nav_left))
-                        .when(playlists_open, |body| {
-                            body.child(
-                                div()
-                                    .w(playlists_width)
-                                    .flex_shrink_0()
-                                    .child(self.playlists_panel.clone()),
-                            )
-                        })
+                        .children(rail_bar)
+                        .children(playlists_left)
+                        .children(queue_left)
                         .child(
                             card(div())
                                 .h_full()
@@ -593,26 +686,12 @@ impl Render for Shell {
                                 .relative()
                                 // A disconnect dims the page and banners over it rather than
                                 // replacing the window, so what was on screen stays on screen.
-                                .child(topbar::content_frame().h_full().child(page))
+                                .child(topbar::content_frame(cx).h_full().child(page))
                                 .child(self.overlays.clone())
                                 .child(self.debug_overlay.clone()),
                         )
-                        .when(dock > 0., |body| {
-                            // The column opens out and fades in together, its contents laid out at full width throughout.
-                            body.child(
-                                card(div())
-                                    .flex_shrink_0()
-                                    .overflow_hidden()
-                                    .w(panel_width * dock)
-                                    .opacity(dock)
-                                    .child(
-                                        div()
-                                            .w(panel_width)
-                                            .h_full()
-                                            .child(self.side_panel.clone()),
-                                    ),
-                            )
-                        }),
+                        .children(queue_right)
+                        .children(playlists_right),
                 )
                 .when(show_player_bar && !player_at_top, |window_body| {
                     window_body.child(self.player_bar.clone())
@@ -653,6 +732,7 @@ impl Render for Shell {
                         .update(cx, |overlay, cx| overlay.toggle(cx));
                 }),
             )
+            .on_scroll_wheel(|event, _, _| components::scroll::saw_wheel(event))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .children(match compact {

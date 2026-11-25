@@ -239,6 +239,37 @@ pub struct CachedTrackRow {
     pub last_played_at: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListeningRows {
+    pub plays: u32,
+    pub seconds: u64,
+    pub tracks: Vec<TrackPlays>,
+    pub artists: Vec<NamePlays>,
+    pub albums: Vec<NamePlays>,
+    pub days: Vec<DayPlays>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackPlays {
+    pub key: String,
+    pub title: String,
+    pub artist: String,
+    pub plays: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NamePlays {
+    pub name: String,
+    pub detail: String,
+    pub plays: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DayPlays {
+    pub day: i64,
+    pub plays: u32,
+}
+
 /// One track's play count, and when it was last played.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlayRecord {
@@ -328,6 +359,17 @@ pub trait ReadStore: Send + Sync {
 
     /// This source's recently-played track keys, newest first (capped).
     async fn recently_played(&self, source: &Source, limit: u32) -> Result<Vec<String>, DbError>;
+
+    async fn listening(
+        &self,
+        source: &Source,
+        since: Option<i64>,
+    ) -> Result<ListeningRows, DbError>;
+
+    async fn artist_keys_by_name(
+        &self,
+        source: &Source,
+    ) -> Result<std::collections::HashMap<String, String>, DbError>;
 
     /// One representative (first-inserted) track per artist, artist A→Z — for
     /// artist tiles that need a cover without pulling the whole source.

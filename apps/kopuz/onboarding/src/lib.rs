@@ -2,6 +2,7 @@
 
 mod appearance;
 mod flow;
+mod layout;
 mod pick;
 mod playback;
 mod privacy;
@@ -24,7 +25,9 @@ use gpui_kit::{
 use link::Link;
 use settings_sources::add_source::{AddSource, SourceAdded};
 use settings_sources::integrations::Integrations;
-use store::{ConfigModel, JobEvent, JobsModel, Navigator, Query, Route, SetupModel, SourcesModel};
+use store::{
+    ConfigModel, JobEvent, JobsModel, Navigator, Notices, Query, Route, SetupModel, SourcesModel,
+};
 
 use flow::Step;
 
@@ -109,7 +112,9 @@ impl FirstRun {
             )
         });
         let add = cx.new(|cx| AddSource::new(window, cx).embedded());
+        let layout = store::LayoutModel::global(cx);
         let subscriptions = vec![
+            cx.observe(&layout, |_, _, cx| cx.notify()),
             cx.observe(&sources, |this, _, cx| this.sources_moved(cx)),
             cx.observe(&services, |_, _, cx| cx.notify()),
             cx.observe(&tracks, |_, _, cx| cx.notify()),
@@ -341,7 +346,18 @@ impl FirstRun {
     fn check_jobs(&mut self, source: SourceInfo, cx: &mut Context<Self>) {
         let call = Link::global(cx).call(|api| async move { api.jobs().await });
         cx.spawn(async move |this, cx| {
-            let Ok(jobs) = call.await else { return };
+            let jobs = match call.await {
+                Ok(jobs) => jobs,
+                // Without the job list the scan can never be seen to end, so the step would wait forever.
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        Notices::failed(&error, cx);
+                        this.settle(false, cx);
+                    })
+                    .ok();
+                    return;
+                }
+            };
             this.update(cx, |this, cx| {
                 let ours: Vec<JobState> = jobs
                     .iter()
@@ -410,10 +426,20 @@ impl FirstRun {
             .await
         });
         cx.spawn(async move |this, cx| {
-            let tracks = tracks.await.map(|page| page.total).unwrap_or(0);
-            let albums = albums.await.map(|page| page.total).unwrap_or(0);
+            let (tracks, albums) = (tracks.await, albums.await);
             this.update(cx, |this, cx| {
-                this.outcome = Some(Outcome { ok, tracks, albums });
+                // A count that could not be read is not an empty library; the fill is not called a success.
+                let counted = tracks.is_ok() && albums.is_ok();
+                if let Err(error) = tracks.as_ref().and(albums.as_ref()) {
+                    Notices::failed(error, cx);
+                }
+                let tracks = tracks.map_or(0, |page| page.total);
+                let albums = albums.map_or(0, |page| page.total);
+                this.outcome = Some(Outcome {
+                    ok: ok && counted,
+                    tracks,
+                    albums,
+                });
                 cx.notify();
             })
             .ok();
@@ -448,10 +474,12 @@ impl FirstRun {
             Ok(())
         });
         cx.spawn(async move |_, cx| {
-            if let Err(error) = call.await {
-                tracing::warn!(%error, "could not take the guide's source away again");
-            }
+            let result = call.await;
             cx.update(|cx| {
+                if let Err(error) = &result {
+                    tracing::warn!(%error, "could not take the guide's source away again");
+                    store::Notices::failed(error, cx);
+                }
                 SourcesModel::global(cx).update(cx, |sources, cx| sources.refetch(cx));
                 ConfigModel::global(cx).update(cx, |config, cx| config.reload(cx));
             });
@@ -538,7 +566,7 @@ impl Render for FirstRun {
                 false => frame,
             },
             Step::Connect if self.added.is_some() => frame.next(
-                t("continue"),
+                t("retry_now"),
                 self.connection_blocked(cx).is_none(),
                 cx.listener(|this: &mut Self, _, _, cx| this.retry(cx)),
             ),

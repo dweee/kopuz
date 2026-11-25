@@ -26,12 +26,14 @@ pub mod palette;
 mod picture;
 mod player;
 mod playing;
+mod playlist_io;
 mod playlists;
 mod query;
 mod queue;
 mod settings_filter;
 mod setup;
 mod signin;
+mod sleep;
 mod sources;
 mod target;
 mod updates;
@@ -43,7 +45,9 @@ pub use artwork_edit::{content_type_for, pick_and_upload, pick_image, remove_art
 pub use backdrop::{blurred_backdrop, resolve_backdrop};
 pub use catalog_cache::{Cached, CatalogCache, Ticket};
 pub use catalog_marks::CatalogMarks;
-pub use chrome::{Chrome, SidePanel, register_mini_player, toggle_mini_player};
+pub use chrome::{
+    Chrome, SidePanel, register_mini_player, register_stage, toggle_mini_player, toggle_stage,
+};
 pub use config::{ConfigModel, lock_cause};
 pub use debounce::Debounce;
 pub use downloads::{BatchFinished, DownloadItem, DownloadsModel, ItemState, Offline};
@@ -65,6 +69,10 @@ pub use palette::Swatches;
 pub use picture::{PictureError, Pictured, copy_picture, extension, file_name, save_picture};
 pub use player::{PlayerModel, Playhead};
 pub use playing::Playing;
+pub use playlist_io::{
+    export_m3u as export_playlist_m3u, import_file as import_playlist_file,
+    import_link as import_playlist_link,
+};
 pub use playlists::PlaylistsModel;
 pub use query::{FirstRead, Query};
 pub use queue::{QueueModel, QueueSummary};
@@ -74,6 +82,7 @@ pub use signin::{
     SignInWait, browser as browser_sign_in, register_password_form, register_session_chooser,
     sign_in_again, sign_in_wait, start_sign_in,
 };
+pub use sleep::{SleepAfter, SleepTimer};
 pub use sources::{NetworkNotice, SourceStatus, SourcesModel, SwitchStarted};
 pub use target::{CatalogEntry, Kind, RowEdit, RowScope, Target, TrackActions};
 pub use updates::UpdateModel;
@@ -147,6 +156,7 @@ pub fn init(cx: &mut App) {
     register(cx, SourcesModel::new);
     register(cx, PlayerModel::new);
     register(cx, Playhead::new);
+    register(cx, SleepTimer::new);
     register(cx, QueueModel::new);
     register(cx, FavoritesModel::new);
     register(cx, PlaylistsModel::new);

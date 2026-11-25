@@ -173,6 +173,11 @@ impl api::PlayerApi for GrpcApi {
                     .set_muted(Request::new(proto::SetMuted { muted }))
                     .await
             }
+            PlayerCommand::SetSpeed { speed } => {
+                self.client()
+                    .set_speed(Request::new(proto::SetSpeed { speed }))
+                    .await
+            }
             PlayerCommand::SetMode { shuffle, loop_mode } => {
                 self.client()
                     .set_mode(Request::new(proto::SetMode {
@@ -754,6 +759,61 @@ impl api::LibraryApi for GrpcApi {
         Ok(convert::lyrics_from_proto(lyrics.get_ref()))
     }
 
+    async fn similar_artists(&self, name: String) -> Result<Vec<api::SimilarArtist>, ApiError> {
+        let answer = self
+            .client()
+            .get_similar_artists(Request::new(proto::SimilarArtistsRequest { name }))
+            .await
+            .map_err(wire_error)?
+            .into_inner();
+        Ok(answer
+            .artists
+            .into_iter()
+            .map(|artist| api::SimilarArtist {
+                name: artist.name,
+                key: artist.key,
+            })
+            .collect())
+    }
+
+    async fn listening_stats(&self, days: Option<u32>) -> Result<api::ListeningStats, ApiError> {
+        let stats = self
+            .client()
+            .get_listening_stats(Request::new(proto::ListeningStatsRequest { days }))
+            .await
+            .map_err(wire_error)?
+            .into_inner();
+        let ranked = |ranked: proto::Ranked| api::Ranked {
+            name: ranked.name,
+            detail: ranked.detail,
+            plays: ranked.plays,
+        };
+        Ok(api::ListeningStats {
+            plays: stats.plays,
+            seconds: stats.seconds,
+            tracks: stats
+                .tracks
+                .into_iter()
+                .map(|track| api::RankedTrack {
+                    key: track.key,
+                    title: track.title,
+                    artist: track.artist,
+                    plays: track.plays,
+                })
+                .collect(),
+            artists: stats.artists.into_iter().map(ranked).collect(),
+            albums: stats.albums.into_iter().map(ranked).collect(),
+            days: stats
+                .days
+                .into_iter()
+                .map(|day| api::DayPlays {
+                    day: day.day,
+                    plays: day.plays,
+                })
+                .collect(),
+        })
+    }
+
     async fn stats(&self) -> Result<api::StatsView, ApiError> {
         let stats = self
             .client()
@@ -1257,6 +1317,32 @@ impl api::PlaylistApi for GrpcApi {
             .await
             .map_err(wire_error)?;
         Ok(id.into_inner().id)
+    }
+
+    async fn import_external_playlist(
+        &self,
+        source: api::ExternalPlaylist,
+    ) -> Result<api::PlaylistImport, ApiError> {
+        use proto::import_external_playlist_request::Source;
+        let source = match source {
+            api::ExternalPlaylist::Link(link) => Source::Link(link),
+            api::ExternalPlaylist::Csv { name, text } => {
+                Source::Csv(proto::CsvPlaylist { name, text })
+            }
+        };
+        let import = self
+            .client()
+            .import_external_playlist(Request::new(proto::ImportExternalPlaylistRequest {
+                source: Some(source),
+            }))
+            .await
+            .map_err(wire_error)?
+            .into_inner();
+        Ok(api::PlaylistImport {
+            id: import.id,
+            matched: import.matched,
+            missing: import.missing,
+        })
     }
 
     async fn import_playlist(

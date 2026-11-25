@@ -1,14 +1,19 @@
 //! Settings → Interface: what the bar keeps in reach, and how the sheet is dressed.
 
 use components::format::t;
-use components::settings::{SettingRow, choice, section, toggle_row};
+use components::settings::{
+    SettingRow, SliderRow, choice, on_slider_change, section, slider_state, toggle_row,
+};
+use gpui_kit::component::slider::SliderState;
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    App, AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled, Window,
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    Styled, Subscription, Window,
 };
 use store::LayoutModel;
 use store::layout::{
-    Backdrop, HeroSize, PlayerSize, QueueStyle, Section as Group, SheetTab, Side, TileSize,
+    Backdrop, HeroSize, LyricsScale, PlayerSize, QueueStyle, Section as Group, SheetTab, Side,
+    TileSize,
 };
 
 /// Contribute both sections; call once at startup, after `settings_interface::init`.
@@ -47,8 +52,7 @@ impl Render for PlayerSettings {
             .child(
                 section(t("interface_player"))
                     .children(
-                        // TODO(i18n): no "player bar size" key yet; the section's own "Player bar" names it.
-                        SettingRow::new(t("interface_player"))
+                        SettingRow::new(t("interface_player_size"))
                             .control(choice(
                                 "player-size",
                                 &player.size,
@@ -167,17 +171,47 @@ impl Render for PlayerSettings {
                         )
                         .description(t("interface_player_mini_hides_main_description"))
                         .shown(cx),
+                    )
+                    .children(
+                        toggle_row(
+                            "player-tray-lyrics",
+                            t("interface_player_tray_lyrics"),
+                            player.tray_lyrics,
+                            |on, cx| LayoutModel::edit(cx, |layout| layout.player.tray_lyrics = on),
+                        )
+                        .description(t("interface_player_tray_lyrics_description"))
+                        .shown(cx),
                     ),
             )
             .into_any_element()
     }
 }
 
-struct SheetSettings;
+struct SheetSettings {
+    lyrics: Entity<SliderState>,
+    _subscriptions: Vec<Subscription>,
+}
 
 impl SheetSettings {
-    fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
-        Self
+    fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
+        let held = store::layout(cx).sheet.lyrics.0;
+        let lyrics = cx.new(|_| {
+            slider_state(
+                f32::from(LyricsScale::MIN),
+                f32::from(LyricsScale::MAX),
+                10.,
+                f32::from(held),
+            )
+        });
+        let moved = on_slider_change(&lyrics, cx, |value, cx| {
+            let percent =
+                value.clamp(f32::from(LyricsScale::MIN), f32::from(LyricsScale::MAX)) as u16;
+            LayoutModel::edit(cx, move |layout| layout.sheet.lyrics = LyricsScale(percent));
+        });
+        Self {
+            lyrics,
+            _subscriptions: vec![moved],
+        }
     }
 }
 
@@ -222,6 +256,24 @@ impl Render for SheetSettings {
                             .shown(cx),
                     )
                     .children(
+                        SettingRow::new(t("interface_queue_side"))
+                            .description(t("interface_queue_side_description"))
+                            .control(choice(
+                                "queue-side",
+                                &store::layout(cx).interface.queue_side,
+                                vec![
+                                    (Side::Left, t("interface_sheet_side_left")),
+                                    (Side::Right, t("interface_sheet_side_right")),
+                                ],
+                                |value, cx| {
+                                    LayoutModel::edit(cx, |layout| {
+                                        layout.interface.queue_side = value
+                                    })
+                                },
+                            ))
+                            .shown(cx),
+                    )
+                    .children(
                         SettingRow::new(t("interface_queue_style"))
                             .description(t("interface_queue_style_description"))
                             .control(choice(
@@ -235,6 +287,16 @@ impl Render for SheetSettings {
                                     LayoutModel::edit(cx, |layout| layout.sheet.queue = value)
                                 },
                             ))
+                            .shown(cx),
+                    )
+                    .children(
+                        SettingRow::new(t("interface_lyrics_size"))
+                            .description(t("interface_lyrics_size_description"))
+                            .control(
+                                SliderRow::new(&self.lyrics).readout(|value| {
+                                    SharedString::from(format!("{}%", value as i32))
+                                }),
+                            )
                             .shown(cx),
                     )
                     .children(
@@ -256,8 +318,7 @@ impl Render for SheetSettings {
                     )
                     .children(
                         SettingRow::new(t("interface_player_cover"))
-                            // TODO(i18n): no key describes the sheet's cover size, nor names an extra-large step.
-                            .description("How large the cover is drawn in the now-playing sheet.")
+                            .description(t("interface_sheet_cover_description"))
                             .control(choice(
                                 "sheet-cover",
                                 &sheet.cover,
@@ -265,7 +326,10 @@ impl Render for SheetSettings {
                                     (HeroSize::Small, t("interface_player_cover_small")),
                                     (HeroSize::Medium, t("interface_player_cover_medium")),
                                     (HeroSize::Large, t("interface_player_cover_large")),
-                                    (HeroSize::ExtraLarge, "Extra large".into()),
+                                    (
+                                        HeroSize::ExtraLarge,
+                                        t("interface_player_cover_extra_large"),
+                                    ),
                                 ],
                                 |value, cx| {
                                     LayoutModel::edit(cx, |layout| layout.sheet.cover = value)

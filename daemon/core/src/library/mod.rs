@@ -427,6 +427,48 @@ impl LibraryService {
         })
     }
 
+    pub async fn listening_stats(
+        &self,
+        days: Option<u32>,
+    ) -> Result<api::ListeningStats, ApiError> {
+        let since = days.map(|days| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs() as i64)
+                .unwrap_or_default();
+            now - i64::from(days) * 86_400
+        });
+        let rows = self
+            .db
+            .listening(&self.query_source(), since)
+            .await
+            .map_err(db_error)?;
+        Ok(api::ListeningStats {
+            plays: rows.plays,
+            seconds: rows.seconds,
+            tracks: rows
+                .tracks
+                .into_iter()
+                .map(|track| api::RankedTrack {
+                    key: track.key,
+                    title: track.title,
+                    artist: track.artist,
+                    plays: track.plays,
+                })
+                .collect(),
+            artists: rows.artists.into_iter().map(ranked).collect(),
+            albums: rows.albums.into_iter().map(ranked).collect(),
+            days: rows
+                .days
+                .into_iter()
+                .map(|day| api::DayPlays {
+                    day: day.day,
+                    plays: day.plays,
+                })
+                .collect(),
+        })
+    }
+
     pub async fn stats(&self) -> Result<api::StatsView, ApiError> {
         let own = self.query_source().listen_count_key("");
         let listen_counts = self
@@ -478,7 +520,7 @@ impl LibraryService {
             track.id.uid(),
         )
         .prefer_local(config.lyrics.prefer_local_lyrics)
-        .enable_musixmatch(config.lyrics.enable_musixmatch_lyrics);
+        .prefer_word_sync(config.lyrics.prefer_word_synced_lyrics);
         if let Some(server) = &sources.server {
             request = request.with_server(
                 Some(&server.url),
@@ -508,25 +550,30 @@ impl LibraryService {
         }
 
         let cache_key = request.cache_key();
-        let lyrics = match server::lyrics::cached_lyrics_for_request(&request) {
-            Some(cached) => cached,
+        // `stored`: the answer was looked up before, so it may predate a provider that now has word timing.
+        let (lyrics, stored) = match server::lyrics::cached_lyrics_for_request(&request) {
+            Some(cached) => (cached, true),
             None => match self.persisted_lyrics(&cache_key).await {
                 Some(persisted) => {
                     server::lyrics::prime(&cache_key, persisted.clone());
-                    persisted
+                    (persisted, true)
                 }
-                None if self.offline().offline_mode() => {
-                    server::lyrics::local_lyrics_for_request(&request).await
-                }
+                None if self.offline().offline_mode() => (
+                    server::lyrics::local_lyrics_for_request(&request).await,
+                    false,
+                ),
                 None => {
                     let fetched = server::lyrics::fetch_lyrics_for_request(&request).await;
                     if fetched.conclusive {
                         self.persist_lyrics(&cache_key, &fetched.lyrics).await;
                     }
-                    fetched.lyrics
+                    (fetched.lyrics, false)
                 }
             },
         };
+        if stored && config.lyrics.prefer_word_synced_lyrics && !self.offline().offline_mode() {
+            self.upgrade_to_word_sync(&cache_key, request.clone(), lyrics.as_ref());
+        }
         lyrics
             .map(|lyrics| lyrics_view(lyrics, config.lyrics.romanize_lyrics))
             .ok_or_else(|| ApiError::not_found("no lyrics found"))
@@ -781,6 +828,14 @@ fn youtube_music_lyrics_auth(
         cookies,
         account: server.account.clone(),
     })
+}
+
+fn ranked(row: db::NamePlays) -> api::Ranked {
+    api::Ranked {
+        name: row.name,
+        detail: row.detail,
+        plays: row.plays,
+    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,8 @@ use api::{PlaylistCapability, Rating};
 use components::format::t;
 use components::icons;
 use gpui_kit::App;
-use store::{Kind, Navigator, Route, Target, actions};
+use store::layout::Pin;
+use store::{Kind, LayoutModel, Navigator, Route, Target, actions};
 
 use crate::catalog;
 use crate::ops;
@@ -16,6 +17,7 @@ const ALBUM: &[Kind] = &[Kind::Album];
 const ARTIST: &[Kind] = &[Kind::Artist];
 const PLAYLIST: &[Kind] = &[Kind::Playlist];
 const FOLDER: &[Kind] = &[Kind::Folder];
+const PINNABLE: &[Kind] = &[Kind::Album, Kind::Artist, Kind::Playlist, Kind::Folder];
 const QUEUE_ITEM: &[Kind] = &[Kind::QueueItem];
 const NOTHING: &[Kind] = &[Kind::None];
 const CATALOG: &[Kind] = &[Kind::Catalog, Kind::Tracks];
@@ -27,6 +29,10 @@ const LIST: &str = "TrackList";
 
 fn yes(_: &Target, _: &App) -> bool {
     true
+}
+
+fn pinned(target: &Target, cx: &App) -> bool {
+    Pin::of(target).is_some_and(|pin| store::layout(cx).panel.is_pinned(pin.kind, &pin.id))
 }
 
 fn has_tracks(target: &Target, _: &App) -> bool {
@@ -607,6 +613,27 @@ static COMMANDS: &[Command] = &[
         },
         action: None,
     },
+    Command {
+        id: "sidebar.pin",
+        labels: &["pin_to_sidebar", "unpin_from_sidebar"],
+        label: |target, cx| match pinned(target, cx) {
+            true => t("unpin_from_sidebar"),
+            false => t("pin_to_sidebar"),
+        },
+        icon: Some(icons::BOOKMARK),
+        group: Group::Library,
+        section: Section::Act,
+        keys: NO_KEYS,
+        danger: false,
+        applies: PINNABLE,
+        available: |target, _| Pin::of(target).is_some(),
+        run: |target, _, cx| {
+            if let Some(pin) = Pin::of(&target) {
+                LayoutModel::edit(cx, move |layout| layout.panel.toggle_pin(pin));
+            }
+        },
+        action: None,
+    },
     // Playlists.
     Command {
         id: "playlist.play",
@@ -656,6 +683,27 @@ static COMMANDS: &[Command] = &[
         run: |target, _, cx| {
             if let Some(id) = ops::playlist_id(&target) {
                 actions::start_playlist_radio(id, cx);
+            }
+        },
+        action: None,
+    },
+    Command {
+        id: "playlist.export_m3u",
+        labels: &["export_m3u"],
+        label: |_, _| t("export_m3u"),
+        icon: Some(icons::EXPORT),
+        group: Group::Library,
+        section: Section::Act,
+        keys: NO_KEYS,
+        danger: false,
+        applies: PLAYLIST,
+        available: |target, cx| {
+            ops::playlist_id(target).is_some_and(|id| !ops::playlist_keys(&id, cx).is_empty())
+        },
+        run: |target, _, cx| {
+            if let (Some(id), Target::Playlist { name, .. }) = (ops::playlist_id(&target), &target)
+            {
+                store::export_playlist_m3u(name.to_string(), ops::playlist_keys(&id, cx), cx);
             }
         },
         action: None,
@@ -1018,6 +1066,20 @@ static COMMANDS: &[Command] = &[
         action: Some(|| Box::new(crate::keys::ToggleMiniPlayer)),
     },
     Command {
+        id: "view.player_on_other_display",
+        labels: &["player_on_other_display"],
+        label: |_, _| t("player_on_other_display"),
+        icon: Some(icons::EXPAND),
+        group: Group::View,
+        section: Section::Hidden,
+        keys: NO_KEYS,
+        danger: false,
+        applies: NOTHING,
+        available: |_, cx| cx.displays().len() > 1,
+        run: |_, _, cx| store::toggle_stage(cx),
+        action: None,
+    },
+    Command {
         id: "app.palette",
         labels: &["command_palette"],
         label: |_, _| t("command_palette"),
@@ -1037,23 +1099,6 @@ static COMMANDS: &[Command] = &[
                 chrome.set_quick_search(!open, cx);
             })
         },
-        action: None,
-    },
-    Command {
-        id: "view.filter",
-        labels: &["filter_view"],
-        label: |_, _| t("filter_view"),
-        icon: Some(icons::SEARCH),
-        group: Group::View,
-        section: Section::Hidden,
-        keys: &[Binding {
-            keystroke: "/",
-            context: SHELL,
-        }],
-        danger: false,
-        applies: NOTHING,
-        available: yes,
-        run: |_, _, _| tracing::warn!("no view owns a filter field yet"),
         action: None,
     },
     Command {

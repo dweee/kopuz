@@ -65,10 +65,10 @@ macro_rules! lyrics_debug {
     };
 }
 
-mod musixmatch;
+mod netease;
 mod paxsenix;
 
-use musixmatch::fetch_from_musixmatch_enhanced;
+use netease::fetch_from_netease;
 use paxsenix::fetch_from_paxsenix_apple_music;
 
 #[derive(Debug, Deserialize)]
@@ -131,7 +131,7 @@ struct PaxsenixAppleLyricPart {
 
 /// Fetch lyrics from local files, source APIs and external providers, preferring
 /// word timing over line timing and plain text. Source-specific lyrics precede
-/// the concurrent Apple Music, Musixmatch and LRCLIB fallbacks.
+/// the concurrent Apple Music, NetEase and LRCLIB fallbacks.
 #[tracing::instrument(name = "lyrics.fetch", skip_all, fields(artist = %request.artist, title = %request.title))]
 pub async fn fetch_lyrics_for_request(request: &LyricsRequest) -> LyricsFetch {
     let reach = ProviderReach::default();
@@ -167,7 +167,6 @@ where
         .as_ref()
         .and_then(|server| server.user_id.as_deref());
     let prefer_local = request.prefer_local;
-    let enable_musixmatch = request.enable_musixmatch;
     let cache_key_hash = log_lyrics_key_hash(&cache_key);
     let total_start = Instant::now();
     lyrics_debug!(
@@ -178,10 +177,11 @@ where
         request.duration,
         request.prefer_local
     );
-    if let Some(cached) = lyrics_cache()
-        .lock()
-        .ok()
-        .and_then(|mut cache| cache.get_cloned(&cache_key))
+    if !request.refresh
+        && let Some(cached) = lyrics_cache()
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get_cloned(&cache_key))
     {
         tracing::info!(
             target: "kopuz::lyrics",
@@ -447,36 +447,33 @@ where
         }
     }
 
-    // Apple Music is the primary remote provider. Optional Musixmatch starts
-    // with it, but can only replace the result when it returns better timing.
+    // Apple Music is the primary remote provider. NetEase starts with it, but
+    // can only replace the result when it returns better timing.
     let apple_started = Instant::now();
-    let musixmatch_started = Instant::now();
     let lrclib_started = Instant::now();
+    let netease_started = Instant::now();
     let apple = fetch_from_paxsenix_apple_music(artist, title, duration, reach);
-    let musixmatch = fetch_from_musixmatch_enhanced(artist, title, reach);
     let lrclib = fetch_from_lrclib(artist, title, album, duration, reach);
+    let netease = fetch_from_netease(artist, title, duration, reach);
     tokio::pin!(apple);
-    tokio::pin!(musixmatch);
     tokio::pin!(lrclib);
+    tokio::pin!(netease);
 
     let mut apple_done = false;
-    let mut musixmatch_done = !enable_musixmatch;
     let mut lrclib_done = !allow_lrclib;
+    let mut netease_done = false;
     let mut progressed: Option<Lyrics> = None;
     let mut primary_quality = 0;
-    let mut musixmatch_candidate: Option<Lyrics> = None;
-    if !enable_musixmatch {
-        lyrics_debug!("provider=musixmatch skipped reason=disabled");
-    }
+    let mut netease_candidate: Option<Lyrics> = None;
     if !allow_lrclib {
         lyrics_debug!("provider=lrclib skipped reason=disabled");
     }
 
     while !apple_done
-        || (!musixmatch_done && primary_quality < 2)
+        || (!netease_done && primary_quality < 2)
         || (!lrclib_done
             && lyrics_quality_option(fallback.as_ref())
-                .max(lyrics_quality_option(musixmatch_candidate.as_ref()))
+                .max(lyrics_quality_option(netease_candidate.as_ref()))
                 < 1)
     {
         tokio::select! {
@@ -513,26 +510,25 @@ where
                     }
                 }
             }
-            result = &mut musixmatch, if !musixmatch_done && primary_quality < 2 => {
-                musixmatch_done = true;
+            result = &mut netease, if !netease_done && primary_quality < 2 => {
+                netease_done = true;
                 tracing::info!(
                     target: "kopuz::lyrics",
-                    "musixmatch_enhanced key_hash={} elapsed_ms={} kind={}",
+                    "netease key_hash={} elapsed_ms={} kind={}",
                     log_lyrics_key_hash(&cache_key),
-                    musixmatch_started.elapsed().as_millis(),
+                    netease_started.elapsed().as_millis(),
                     lyrics_kind(result.as_ref())
                 );
                 lyrics_debug!(
-                    "provider=musixmatch elapsed_ms={} kind={}",
-                    musixmatch_started.elapsed().as_millis(),
+                    "provider=netease elapsed_ms={} kind={}",
+                    netease_started.elapsed().as_millis(),
                     lyrics_kind(result.as_ref())
                 );
-                if let Some(lyrics) = result
-                {
-                    musixmatch_candidate = Some(lyrics);
+                if let Some(lyrics) = result {
+                    netease_candidate = Some(lyrics);
                 }
             }
-            result = &mut lrclib, if !lrclib_done && lyrics_quality_option(fallback.as_ref()).max(lyrics_quality_option(musixmatch_candidate.as_ref())) < 1 => {
+            result = &mut lrclib, if !lrclib_done && lyrics_quality_option(fallback.as_ref()).max(lyrics_quality_option(netease_candidate.as_ref())) < 1 => {
                 lrclib_done = true;
                 tracing::info!(
                     target: "kopuz::lyrics",
@@ -559,7 +555,7 @@ where
         }
     }
 
-    if let Some(lyrics) = musixmatch_candidate
+    if let Some(lyrics) = netease_candidate
         && fallback
             .as_ref()
             .map(|current| lyrics_quality(&lyrics) > lyrics_quality(current))
@@ -567,10 +563,6 @@ where
     {
         fallback = Some(lyrics.clone());
         on_progress(lyrics);
-    }
-
-    if enable_musixmatch && !musixmatch_done {
-        lyrics_debug!("provider=musixmatch skipped reason=primary_quality");
     }
 
     if allow_lrclib && !lrclib_done {
@@ -613,7 +605,8 @@ pub async fn local_lyrics_for_request(request: &LyricsRequest) -> Option<Lyrics>
     fetch_local_lrc(&request.track_path).await
 }
 
-fn has_word_timestamps(lyrics: &Lyrics) -> bool {
+/// Whether any line carries timing for its words, not only for itself.
+pub fn has_word_timestamps(lyrics: &Lyrics) -> bool {
     match lyrics {
         Lyrics::Synced(lines) => lines.iter().any(|line| line.chunks.len() > 1),
         Lyrics::Plain(_) => false,
@@ -738,7 +731,7 @@ fn lyrics_terminal_debug_enabled() -> bool {
 
 /// Bumped whenever the chain gains a provider, so a miss remembered before
 /// that provider could answer is not served in place of asking it.
-const PROVIDER_REVISION: u32 = 2;
+const PROVIDER_REVISION: u32 = 3;
 
 fn lyrics_cache_key(
     artist: &str,
@@ -746,11 +739,12 @@ fn lyrics_cache_key(
     album: &str,
     duration: u64,
     track_path: &str,
-    enable_musixmatch: bool,
+    prefer_word_sync: bool,
 ) -> String {
+    // Its own key, so turning it on asks again for every track rather than reading old answers.
     let provider_policy = format!(
-        "{}|p{PROVIDER_REVISION}",
-        if enable_musixmatch { "mm:on" } else { "mm:off" }
+        "{}p{PROVIDER_REVISION}",
+        if prefer_word_sync { "ws:on|" } else { "" }
     );
     if !track_path.trim().is_empty() {
         return format!("{}|{}", track_path.trim(), provider_policy);
@@ -909,7 +903,6 @@ fn extract_from_lrclib_response(data: &LrcLibResponse) -> Option<Lyrics> {
 
 #[cfg(test)]
 mod tests {
-    use super::musixmatch::musixmatch_richsync_to_lrc;
     use super::paxsenix::{best_itunes_song, paxsenix_apple_to_lyrics};
     use super::*;
 
@@ -1001,21 +994,6 @@ mod tests {
         assert!(logged.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!logged.contains("/Users"));
         assert_ne!(logged, key);
-    }
-
-    #[test]
-    fn converts_musixmatch_richsync_to_enhanced_lrc() {
-        let body = r#"[{"ts":10.0,"l":[{"o":0.1,"c":"Hello"},{"o":0.6,"c":"world"}]}]"#;
-        let lrc = musixmatch_richsync_to_lrc(body).expect("richsync should convert");
-        let parsed = parse_lrc(&lrc);
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].start_time, 10.0);
-        assert_eq!(parsed[0].chunks.len(), 2);
-        assert_eq!(parsed[0].chunks[0].start_time, 10.1);
-        assert_eq!(parsed[0].chunks[0].text, "Hello ");
-        assert_eq!(parsed[0].chunks[1].start_time, 10.6);
-        assert_eq!(parsed[0].chunks[1].text, "world ");
     }
 
     #[test]

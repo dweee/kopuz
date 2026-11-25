@@ -95,9 +95,31 @@ impl Library {
             buttons.push(
                 IconButton::new("library-new-folder", icons::FOLDER)
                     .tooltip(t("new_folder"))
-                    .on_click(|_, _, cx| new_folder(cx)),
+                    .on_click(|_, window, cx| new_folder(window, cx)),
             );
         }
+        // A source that keeps no playlists of its own has nothing to import into or add to.
+        if SourcesModel::global(cx).read(cx).capabilities().playlists == PlaylistCapability::None {
+            return buttons;
+        }
+        buttons.push(
+            IconButton::new("library-import-playlist", icons::IMPORT)
+                .tooltip(t("import_playlist"))
+                .on_click(|_, _, cx| store::import_playlist_file(cx)),
+        );
+        buttons.push(
+            IconButton::new("library-import-link", icons::LINK)
+                .tooltip(t("import_playlist_link"))
+                .on_click(|_, window, cx| {
+                    components::dialogs::open_rename(
+                        t("import_playlist_link"),
+                        "",
+                        store::import_playlist_link,
+                        window,
+                        cx,
+                    )
+                }),
+        );
         buttons.push(
             IconButton::new("library-add-playlist", icons::PLUS)
                 .tooltip(t("add_playlist"))
@@ -107,12 +129,23 @@ impl Library {
     }
 }
 
-/// A folder named the way the Dioxus page named one, renamed from its card's menu.
-pub(crate) fn new_folder(cx: &mut App) {
-    let name = t("new_folder").to_string();
-    actions::run(cx, move |api| async move {
-        api.create_playlist_folder(name).await
-    });
+/// Ask for the new folder's name first; an empty answer makes nothing.
+pub(crate) fn new_folder(window: &mut Window, cx: &mut App) {
+    components::dialogs::open_rename(
+        t("new_folder"),
+        t("new_folder"),
+        |name, cx| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            actions::run(cx, move |api| async move {
+                api.create_playlist_folder(name).await
+            });
+        },
+        window,
+        cx,
+    );
 }
 
 /// The keys of every playlist a folder holds, in the folder's order.
@@ -182,6 +215,8 @@ impl AddPlaylist {
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name.read(cx).value().to_string();
         if name.trim().is_empty() {
+            self.error = Some(t("playlist_name_required"));
+            cx.notify();
             return;
         }
         // A source that cannot mutate playlists gets the friendly line, not a raw refusal.
@@ -202,11 +237,12 @@ impl AddPlaylist {
             multiple: false,
             prompt: None,
         });
-        window.close_dialog(cx);
-        cx.spawn(async move |_, cx| {
+        // The dialog stays up until a folder is picked, so dismissing the picker leaves it as it was.
+        cx.spawn_in(window, async move |_, cx| {
             let Ok(Ok(Some(paths))) = picked.await else {
                 return;
             };
+            cx.update(|window, cx| window.close_dialog(cx)).ok();
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
@@ -220,13 +256,14 @@ impl AddPlaylist {
             } else {
                 format!("{raw}{}", std::path::MAIN_SEPARATOR)
             };
-            cx.update(|cx| {
+            cx.update(|_, cx| {
                 actions::run(cx, move |api| async move {
                     let page = api.folder_tracks(prefix, store::all()).await?;
                     let keys = page.items.into_iter().map(|track| track.key).collect();
                     api.create_playlist(name, keys).await
                 });
-            });
+            })
+            .ok();
         })
         .detach();
     }

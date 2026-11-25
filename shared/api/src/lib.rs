@@ -43,9 +43,10 @@ pub use jobs::{
 };
 pub use library::{
     AlbumInfo, AlbumPage, AlbumQuery, ArtistCredit, ArtistDetail, ArtistInfo, ArtistPage,
-    ArtistQuery, DEFAULT_PAGE_LIMIT, LyricChunkView, LyricLineView, LyricsView, Page,
-    SearchRequest, SearchResults, SearchSuggestion, StatsView, TrackCounterpart, TrackFilter,
-    TrackInfo, TrackPage, TrackSort, TrackVersion, total_duration_secs,
+    ArtistQuery, DEFAULT_PAGE_LIMIT, DayPlays, ListeningStats, LyricChunkView, LyricLineView,
+    LyricsView, Page, Ranked, RankedTrack, SearchRequest, SearchResults, SearchSuggestion,
+    SimilarArtist, StatsView, TrackCounterpart, TrackFilter, TrackInfo, TrackPage, TrackSort,
+    TrackVersion, total_duration_secs,
 };
 pub use mutations::{ArtworkChange, ArtworkUpload, TrackMetadataPatch};
 pub use player::{
@@ -54,8 +55,8 @@ pub use player::{
     VideoRequest,
 };
 pub use playlists::{
-    PlaylistCatalog, PlaylistEdit, PlaylistFolderInfo, PlaylistImport, PlaylistInfo,
-    PlaylistPrivacy, PlaylistReorder,
+    ExternalPlaylist, PlaylistCatalog, PlaylistEdit, PlaylistFolderInfo, PlaylistImport,
+    PlaylistInfo, PlaylistPrivacy, PlaylistReorder,
 };
 pub use plugins::{PluginCatalog, PluginInfo, PluginOrigin, PluginUpdate};
 pub use prefs::{
@@ -238,6 +239,8 @@ pub trait LibraryApi: Send + Sync {
     /// One artist's name, photo, count and billed albums.
     async fn artist(&self, artist: String) -> Result<ArtistDetail, ApiError>;
 
+    async fn similar_artists(&self, name: String) -> Result<Vec<SimilarArtist>, ApiError>;
+
     /// One track per artist, for the artist grid's tiles.
     async fn artist_sample_tracks(&self, page: Page) -> Result<TrackPage, ApiError>;
 
@@ -314,6 +317,8 @@ pub trait LibraryApi: Send + Sync {
 
     async fn stats(&self) -> Result<StatsView, ApiError>;
 
+    async fn listening_stats(&self, days: Option<u32>) -> Result<ListeningStats, ApiError>;
+
     async fn favorites(&self) -> Result<FavoritesView, ApiError>;
 
     /// Optimistic set: recorded locally and reflected immediately, pushed to
@@ -376,6 +381,11 @@ pub trait PlaylistApi: Send + Sync {
         name: String,
         m3u: String,
         base_dir: Option<String>,
+    ) -> Result<PlaylistImport, ApiError>;
+
+    async fn import_external_playlist(
+        &self,
+        source: ExternalPlaylist,
     ) -> Result<PlaylistImport, ApiError>;
 
     async fn rename_playlist(&self, id: String, name: String) -> Result<(), ApiError>;

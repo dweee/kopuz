@@ -139,6 +139,16 @@ pub struct PlayerState {
     pub error: Option<crate::error::ErrorBody>,
     /// Output pipeline latency, for lyric/visual sync offsets.
     pub output_latency_ms: Option<u64>,
+    pub speed: f32,
+}
+
+impl PlayerState {
+    pub fn rate(&self) -> f32 {
+        match self.speed > 0. {
+            true => self.speed,
+            false => 1.,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -158,6 +168,9 @@ pub enum PlayerCommand {
     },
     SetMuted {
         muted: bool,
+    },
+    SetSpeed {
+        speed: f32,
     },
     SetMode {
         shuffle: Option<bool>,

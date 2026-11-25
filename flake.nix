@@ -1,11 +1,11 @@
 {
   description = "Kopuz with native Qobuz support";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/a7331f828844e45246485f65ef5773bf6971bc2d";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/d0ebba32700368b01024c35658574de85793c52e";
   # A flake input, not fetchFromGitHub + import: evaluation must not need a
   # build, or the release gate's no-build retained-root evaluation fails.
   inputs.crane.url = "github:ipetkov/crane/95e62def851e9d650f0eab63cb4f59a3306e20bd";
   inputs.rust-overlay = {
-    url = "github:oxalica/rust-overlay/639e209cc8eecd0c307fd95c8aabc011bf047c41";
+    url = "github:oxalica/rust-overlay/67021b279bfffe654a0201ede805748a255ae5a7";
     inputs.nixpkgs.follows = "nixpkgs";
   };
   outputs =

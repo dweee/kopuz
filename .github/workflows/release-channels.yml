@@ -100,6 +100,13 @@ jobs:
         fetch-depth: 0
         submodules: false
         persist-credentials: false
+    - name: Reclaim hosted runner space for Nix
+      if: ${{ runner.os == 'Linux' || runner.arch == 'ARM64' }}
+      uses: wimpysworld/nothing-but-nix@c42920bb7515b766b1c69f5db46cb13124270f7e
+      with:
+        hatchet-protocol: cleave
+        root-safe-haven: ${{ runner.os == 'Linux' && '16384' || 'auto' }}
+        witness-carnage: true
     - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
       if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
       with:
@@ -115,6 +122,7 @@ jobs:
           extra-substituters = https://install.determinate.systems https://cache.lix.systems https://nix-community.cachix.org https://cache.nixos.org/ https://ai.cachix.org https://cache.numtide.com https://codex-desktop-linux.cachix.org https://nix-on-droid.cachix.org https://virby-nix-darwin.cachix.org https://cache.nixos-cuda.org https://cache.flox.dev
           extra-trusted-public-keys = cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.nixos.org-1:CNHJZBh9K4tP3EKF6FkkgeVYsS3ohTl+oS0Qa8bezVs= cache.lix.systems:aBnZUw8zA7H35Cz2RyKFVs3H4PlGTLawyY5KRbvJR8o= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= ai.cachix.org-1:N9dzRK+alWwoKXQlnn0H6aUx0lU/mspIoz8hMvGvbbc= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= codex-desktop-linux.cachix.org-1:nX/xy6AdK9hQE24A8ALGjkCKj2ObFmcnemiL5Cid4nk= nix-on-droid.cachix.org-1:56snoMJTXmDRC1Ei24CmKoUqvHJ9XCp+nidK7qkMQrU= lantian:WVGO7vsRMSEN+h7Lp7kv6SAmrkEXgUGbbXm7jMDjBuQ= virby-nix-darwin.cachix.org-1:z9GiEZeBU5bEeoDQjyfHPMGPBaIQJOOvYOOjGMKIlLo= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M= flox-cache-public-1:7F4OyH7ZCnFhcze3fJdfyXYLQw/aV7GEed86nQ7IsOs= niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=
           connect-timeout = 20
+          ${{ runner.os == 'Linux' && 'build-dir = /nix/build' || '' }}
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
       if: ${{ runner.os == 'macOS' && runner.arch == 'X64' }}
       with:
@@ -228,6 +236,13 @@ jobs:
         fetch-depth: 0
         submodules: false
         persist-credentials: false
+    - name: Reclaim hosted runner space for Nix
+      if: ${{ runner.os == 'Linux' || runner.arch == 'ARM64' }}
+      uses: wimpysworld/nothing-but-nix@c42920bb7515b766b1c69f5db46cb13124270f7e
+      with:
+        hatchet-protocol: cleave
+        root-safe-haven: ${{ runner.os == 'Linux' && '16384' || 'auto' }}
+        witness-carnage: true
     - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
       if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
       with:
@@ -243,6 +258,7 @@ jobs:
           extra-substituters = https://install.determinate.systems https://cache.lix.systems https://nix-community.cachix.org https://cache.nixos.org/ https://ai.cachix.org https://cache.numtide.com https://codex-desktop-linux.cachix.org https://nix-on-droid.cachix.org https://virby-nix-darwin.cachix.org https://cache.nixos-cuda.org https://cache.flox.dev
           extra-trusted-public-keys = cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.nixos.org-1:CNHJZBh9K4tP3EKF6FkkgeVYsS3ohTl+oS0Qa8bezVs= cache.lix.systems:aBnZUw8zA7H35Cz2RyKFVs3H4PlGTLawyY5KRbvJR8o= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= ai.cachix.org-1:N9dzRK+alWwoKXQlnn0H6aUx0lU/mspIoz8hMvGvbbc= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= codex-desktop-linux.cachix.org-1:nX/xy6AdK9hQE24A8ALGjkCKj2ObFmcnemiL5Cid4nk= nix-on-droid.cachix.org-1:56snoMJTXmDRC1Ei24CmKoUqvHJ9XCp+nidK7qkMQrU= lantian:WVGO7vsRMSEN+h7Lp7kv6SAmrkEXgUGbbXm7jMDjBuQ= virby-nix-darwin.cachix.org-1:z9GiEZeBU5bEeoDQjyfHPMGPBaIQJOOvYOOjGMKIlLo= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M= flox-cache-public-1:7F4OyH7ZCnFhcze3fJdfyXYLQw/aV7GEed86nQ7IsOs= niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=
           connect-timeout = 20
+          ${{ runner.os == 'Linux' && 'build-dir = /nix/build' || '' }}
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
       if: ${{ runner.os == 'macOS' && runner.arch == 'X64' }}
       with:
@@ -356,6 +372,13 @@ jobs:
         fetch-depth: 0
         submodules: false
         persist-credentials: false
+    - name: Reclaim hosted runner space for Nix
+      if: ${{ runner.os == 'Linux' || runner.arch == 'ARM64' }}
+      uses: wimpysworld/nothing-but-nix@c42920bb7515b766b1c69f5db46cb13124270f7e
+      with:
+        hatchet-protocol: cleave
+        root-safe-haven: ${{ runner.os == 'Linux' && '16384' || 'auto' }}
+        witness-carnage: true
     - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
       if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
       with:
@@ -371,6 +394,7 @@ jobs:
           extra-substituters = https://install.determinate.systems https://cache.lix.systems https://nix-community.cachix.org https://cache.nixos.org/ https://ai.cachix.org https://cache.numtide.com https://codex-desktop-linux.cachix.org https://nix-on-droid.cachix.org https://virby-nix-darwin.cachix.org https://cache.nixos-cuda.org https://cache.flox.dev
           extra-trusted-public-keys = cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.nixos.org-1:CNHJZBh9K4tP3EKF6FkkgeVYsS3ohTl+oS0Qa8bezVs= cache.lix.systems:aBnZUw8zA7H35Cz2RyKFVs3H4PlGTLawyY5KRbvJR8o= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= ai.cachix.org-1:N9dzRK+alWwoKXQlnn0H6aUx0lU/mspIoz8hMvGvbbc= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= codex-desktop-linux.cachix.org-1:nX/xy6AdK9hQE24A8ALGjkCKj2ObFmcnemiL5Cid4nk= nix-on-droid.cachix.org-1:56snoMJTXmDRC1Ei24CmKoUqvHJ9XCp+nidK7qkMQrU= lantian:WVGO7vsRMSEN+h7Lp7kv6SAmrkEXgUGbbXm7jMDjBuQ= virby-nix-darwin.cachix.org-1:z9GiEZeBU5bEeoDQjyfHPMGPBaIQJOOvYOOjGMKIlLo= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M= flox-cache-public-1:7F4OyH7ZCnFhcze3fJdfyXYLQw/aV7GEed86nQ7IsOs= niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=
           connect-timeout = 20
+          ${{ runner.os == 'Linux' && 'build-dir = /nix/build' || '' }}
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
       if: ${{ runner.os == 'macOS' && runner.arch == 'X64' }}
       with:
